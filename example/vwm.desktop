@@ -1,5 +1,5 @@
 [Desktop Entry]
 Name=VWM
 Comment=Veasman's Window Manager
-Exec=/usr/bin/vwm
+Exec=/usr/local/bin/vwm
 Type=Application
