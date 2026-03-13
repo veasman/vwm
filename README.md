@@ -27,11 +27,7 @@ vwm focuses on:
 
 ## Video demonstration
 
-A short demo is available here:
-
-[Watch the demo](assets/demo.mp4)
-
-If GitHub does not embed the video directly in the README, users can still download and open it from the repository.
+![Watch the demo](assets/demo.mp4)
 
 ---
 
@@ -47,7 +43,7 @@ If GitHub does not embed the video directly in the README, users can still downl
 * customizable status bar input through root window name
 * configurable colors and fonts
 * live config reload (`SIGHUP`)
-* simple configuration format
+* simple config format with include support
 
 ---
 
@@ -145,7 +141,8 @@ If the example config does not already exist in your home directory, you can cop
 
 ```bash
 mkdir -p ~/.config/vwm
-cp examples/config.toml ~/.config/vwm/config.toml
+cp example/config.conf ~/.config/vwm/config.conf
+cp example/theme.conf ~/.config/vwm/theme.conf
 ```
 
 ---
@@ -160,7 +157,7 @@ sudo ./scripts/uninstall.sh
 
 This removes the files installed by `install.sh`.
 
-Your personal config file in `~/.config/vwm/` is not deleted.
+Your personal config files in `~/.config/vwm/` are not deleted.
 
 ---
 
@@ -184,50 +181,97 @@ If using a display manager, the installed desktop entry should allow vwm to appe
 
 # Configuration
 
-vwm is configured using a simple configuration file located at:
+vwm is configured using a simple config file located at:
 
 ```text
-~/.config/vwm/config.toml
+~/.config/vwm/config.conf
 ```
-
-The configuration format is intentionally minimal: each option is defined as a `key = value` pair.
 
 A default example config is included in:
 
 ```text
-examples/config.toml
+example/config.conf
 ```
 
-Example configuration:
+The config format is intentionally minimal and kitty-like:
 
-```toml
-terminal = "kitty"
-launcher = "dmenu_run"
-scratchpad = "kitty"
-scratchpad_class = "vwm-scratchpad"
-
-font = "FiraCode Nerd Font"
-font_size = 11
-
-gap_px = 10
-border_width = 2
-default_mfact = 0.5
-
-bar_height = 22
-bar_outer_gap = 0
-
-sync_workspaces = true
-
-bar_bg = 0x111111
-bar_fg = 0xd0d0d0
-
-border_active = 0xff8800
-border_inactive = 0x444444
-
-workspace_current = 0xff8800
-workspace_occupied = 0x8c8c8c
-workspace_empty = 0x4a4a4a
+```text
+key value
 ```
+
+Comments begin with `#`.
+
+Example:
+
+```conf
+terminal kitty
+launcher rofi -show drun
+scratchpad kitty
+scratchpad_class vwm-scratchpad
+
+font_family JetBrainsMono Nerd Font
+font_size 11
+
+gap_px 10
+border_width 2
+default_mfact 0.5
+
+bar_height 22
+bar_outer_gap 0
+
+sync_workspaces yes
+
+include ~/.config/vwm/theme.conf
+```
+
+---
+
+## Include Support
+
+vwm supports including another config file from the main config:
+
+```conf
+include ~/.config/vwm/theme.conf
+```
+
+Included files are loaded in order and can override values from the main config.
+
+This makes it easy to keep a stable base config while swapping theme files or generating theme overrides from external tools.
+
+Example layout:
+
+```text
+~/.config/vwm/config.conf
+~/.config/vwm/theme.conf
+```
+
+Example main config:
+
+```conf
+terminal kitty
+launcher rofi -show drun
+scratchpad kitty
+scratchpad_class vwm-scratchpad
+
+default_mfact 0.5
+sync_workspaces yes
+
+include ~/.config/vwm/theme.conf
+```
+
+Example included file:
+
+```conf
+bar_bg 0x111111
+bar_fg 0xd0d0d0
+border_active 0xff8800
+border_inactive 0x444444
+workspace_current 0xff8800
+workspace_occupied 0x8c8c8c
+workspace_empty 0x4a4a4a
+```
+
+---
 
 ## Program Commands
 
@@ -242,11 +286,17 @@ These define the programs launched by various keybindings.
 
 Example:
 
-```toml
-terminal = "kitty"
-launcher = "dmenu_run"
-scratchpad = "kitty"
-scratchpad_class = "vwm-scratchpad"
+```conf
+terminal kitty
+launcher rofi -show drun
+scratchpad kitty
+scratchpad_class vwm-scratchpad
+```
+
+Commands may include arguments:
+
+```conf
+launcher rofi -show drun
 ```
 
 ---
@@ -255,16 +305,16 @@ scratchpad_class = "vwm-scratchpad"
 
 The status bar uses **Xft** for font rendering.
 
-| Option      | Description                      |
-| ----------- | -------------------------------- |
-| `font`      | Font family name                 |
-| `font_size` | Font size used in the status bar |
+| Option        | Description                      |
+| ------------- | -------------------------------- |
+| `font_family` | Font family name                 |
+| `font_size`   | Font size used in the status bar |
 
 Example:
 
-```toml
-font = "FiraCode Nerd Font"
-font_size = 11
+```conf
+font_family JetBrainsMono Nerd Font
+font_size 11
 ```
 
 ---
@@ -281,10 +331,10 @@ These control tiling behavior.
 
 Example:
 
-```toml
-gap_px = 10
-border_width = 2
-default_mfact = 0.55
+```conf
+gap_px 10
+border_width 2
+default_mfact 0.55
 ```
 
 `default_mfact` controls how much space the master window takes.
@@ -303,23 +353,32 @@ These control the appearance and placement of the status bar.
 
 Example:
 
-```toml
-bar_height = 24
-bar_outer_gap = 6
+```conf
+bar_height 24
+bar_outer_gap 6
 ```
 
 ---
 
 ## Workspace Behavior
 
-| Option            | Description                                        |
-| ----------------- | -------------------------------------------------- |
-| `sync_workspaces` | If `true`, all monitors switch workspaces together |
+| Option            | Description                                         |
+| ----------------- | --------------------------------------------------- |
+| `sync_workspaces` | If enabled, all monitors switch workspaces together |
+
+Accepted boolean values include:
+
+```text
+yes / no
+true / false
+on / off
+1 / 0
+```
 
 Example:
 
-```toml
-sync_workspaces = true
+```conf
+sync_workspaces yes
 ```
 
 When disabled, each monitor maintains its own independent workspace.
@@ -353,14 +412,14 @@ Colors are defined using hexadecimal RGB values:
 
 Example:
 
-```toml
-bar_bg = 0x111111
-bar_fg = 0xd0d0d0
-border_active = 0xff8800
-border_inactive = 0x444444
-workspace_current = 0xff8800
-workspace_occupied = 0x8c8c8c
-workspace_empty = 0x4a4a4a
+```conf
+bar_bg 0x111111
+bar_fg 0xd0d0d0
+border_active 0xff8800
+border_inactive 0x444444
+workspace_current 0xff8800
+workspace_occupied 0x8c8c8c
+workspace_empty 0x4a4a4a
 ```
 
 ---
@@ -435,9 +494,9 @@ Mod + `
 
 The scratchpad command is defined in the config:
 
-```toml
-scratchpad = "kitty"
-scratchpad_class = "vwm-scratchpad"
+```conf
+scratchpad kitty
+scratchpad_class vwm-scratchpad
 ```
 
 ---
@@ -476,3 +535,5 @@ Future versions aim to expand this system to support:
 # License
 
 MIT License
+
+

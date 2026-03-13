@@ -33,6 +33,7 @@
 #define CMD_MAX_ARGS 16
 #define KEYBIND_COUNT 35
 #define CONFIG_PATH_MAX 4096
+#define CONFIG_INCLUDE_MAX_DEPTH 16
 #define MFAC_STEP 0.05f
 
 #define LENGTH(x) (sizeof(x) / sizeof((x)[0]))
@@ -107,12 +108,11 @@ typedef struct {
     char terminal[256];
     char launcher[256];
     char scratchpad[256];
+    char scratchpad_class[256];
 
-    char terminal_arg0[256];
-    char launcher_arg0[256];
-    char scratchpad_arg0[256];
-    char scratchpad_arg1[256];
-    char scratchpad_arg2[256];
+    char term_cmd_storage[CMD_MAX_ARGS][256];
+    char launcher_cmd_storage[CMD_MAX_ARGS][256];
+    char scratchpad_cmd_storage[CMD_MAX_ARGS][256];
 
     const char *term_cmd[CMD_MAX_ARGS];
     const char *launcher_cmd[CMD_MAX_ARGS];
@@ -281,12 +281,19 @@ static void reload_config(const void *arg);
 static void init_default_keybinds(void);
 static void dispatch_action(Action action);
 
+static void load_config_file_recursive(const char *path, int depth);
+static void resolve_include_path(const char *base_path, const char *include_path, char *out, size_t outsz);
+static void expand_home_path(const char *in, char *out, size_t outsz);
+static void dir_from_path(const char *path, char *out, size_t outsz);
+static size_t split_command_argv(const char *src, char storage[CMD_MAX_ARGS][256], const char **argv, size_t max_args);
+static bool split_config_kv(char *line, char **key_out, char **val_out);
+
 static void load_config_file(const char *path);
 static char *trim_whitespace(char *s);
 static void strip_comment(char *s);
 static bool parse_bool_value(const char *s, bool *out);
 static bool parse_color_value(const char *s, uint32_t *out);
-static void toml_unquote_inplace(char *s);
+static void config_unquote_inplace(char *s);
 
 static void free_xft_resources(void);
 static void alloc_xft_color(XftColor *dst, uint32_t rgb);
@@ -320,7 +327,7 @@ static void decrease_mfact(const void *arg);
 static void increase_mfact(const void *arg);
 static void zoom_master(const void *arg);
 
-static const char *launcher_fallback[] = {"dmenu_run", NULL};
+static const char *launcher_fallback[] = {"rofi -show drun", NULL};
 
 typedef struct {
     int workspace;
@@ -2155,20 +2162,58 @@ static void toggle_scratchpad(const void *arg) {
 }
 
 static void rebuild_config_commands(void) {
+    size_t argc = 0;
+
+    memset(wm.config.term_cmd_storage, 0, sizeof(wm.config.term_cmd_storage));
+    memset(wm.config.launcher_cmd_storage, 0, sizeof(wm.config.launcher_cmd_storage));
+    memset(wm.config.scratchpad_cmd_storage, 0, sizeof(wm.config.scratchpad_cmd_storage));
+
     memset(wm.config.term_cmd, 0, sizeof(wm.config.term_cmd));
     memset(wm.config.launcher_cmd, 0, sizeof(wm.config.launcher_cmd));
     memset(wm.config.scratchpad_cmd, 0, sizeof(wm.config.scratchpad_cmd));
 
-    wm.config.term_cmd[0] = wm.config.terminal_arg0;
-    wm.config.term_cmd[1] = NULL;
+    split_command_argv(
+        wm.config.terminal,
+        wm.config.term_cmd_storage,
+        wm.config.term_cmd,
+        CMD_MAX_ARGS
+    );
 
-    wm.config.launcher_cmd[0] = wm.config.launcher_arg0;
-    wm.config.launcher_cmd[1] = NULL;
+    split_command_argv(
+        wm.config.launcher,
+        wm.config.launcher_cmd_storage,
+        wm.config.launcher_cmd,
+        CMD_MAX_ARGS
+    );
 
-    wm.config.scratchpad_cmd[0] = wm.config.scratchpad_arg0;
-    wm.config.scratchpad_cmd[1] = wm.config.scratchpad_arg1;
-    wm.config.scratchpad_cmd[2] = wm.config.scratchpad_arg2;
-    wm.config.scratchpad_cmd[3] = NULL;
+    argc = split_command_argv(
+        wm.config.scratchpad,
+        wm.config.scratchpad_cmd_storage,
+        wm.config.scratchpad_cmd,
+        CMD_MAX_ARGS
+    );
+
+    if (wm.config.scratchpad_class[0] != '\0' && argc + 2 < CMD_MAX_ARGS) {
+        snprintf(
+            wm.config.scratchpad_cmd_storage[argc],
+            sizeof(wm.config.scratchpad_cmd_storage[argc]),
+            "%s",
+            "--class"
+        );
+        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
+        argc++;
+
+        snprintf(
+            wm.config.scratchpad_cmd_storage[argc],
+            sizeof(wm.config.scratchpad_cmd_storage[argc]),
+            "%s",
+            wm.config.scratchpad_class
+        );
+        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
+        argc++;
+
+        wm.config.scratchpad_cmd[argc] = NULL;
+    }
 }
 
 static void init_default_keybinds(void) {
@@ -2249,13 +2294,32 @@ static void strip_comment(char *s) {
         return;
     }
 
-    bool in_string = false;
+    bool in_single = false;
+    bool in_double = false;
+    bool escaped = false;
+
     for (char *p = s; *p; p++) {
-        if (*p == '"' && (p == s || p[-1] != '\\')) {
-            in_string = !in_string;
+        if (escaped) {
+            escaped = false;
             continue;
         }
-        if (!in_string && *p == '#') {
+
+        if (*p == '\\') {
+            escaped = true;
+            continue;
+        }
+
+        if (!in_single && *p == '"') {
+            in_double = !in_double;
+            continue;
+        }
+
+        if (!in_double && *p == '\'') {
+            in_single = !in_single;
+            continue;
+        }
+
+        if (!in_single && !in_double && *p == '#') {
             *p = '\0';
             return;
         }
@@ -2267,12 +2331,18 @@ static bool parse_bool_value(const char *s, bool *out) {
         return false;
     }
 
-    if (strcmp(s, "true") == 0) {
+    if (strcmp(s, "1") == 0 ||
+        strcmp(s, "true") == 0 ||
+        strcmp(s, "yes") == 0 ||
+        strcmp(s, "on") == 0) {
         *out = true;
         return true;
     }
 
-    if (strcmp(s, "false") == 0) {
+    if (strcmp(s, "0") == 0 ||
+        strcmp(s, "false") == 0 ||
+        strcmp(s, "no") == 0 ||
+        strcmp(s, "off") == 0) {
         *out = false;
         return true;
     }
@@ -2294,15 +2364,17 @@ static bool parse_color_value(const char *s, uint32_t *out) {
     return true;
 }
 
-static void toml_unquote_inplace(char *s) {
+static void config_unquote_inplace(char *s) {
     if (!s) {
         return;
     }
 
     size_t len = strlen(s);
-    if (len >= 2 && s[0] == '"' && s[len - 1] == '"') {
-        memmove(s, s + 1, len - 2);
-        s[len - 2] = '\0';
+    if (len >= 2) {
+        if ((s[0] == '"' && s[len - 1] == '"') || (s[0] == '\'' && s[len - 1] == '\'')) {
+            memmove(s, s + 1, len - 2);
+            s[len - 2] = '\0';
+        }
     }
 }
 
@@ -2320,13 +2392,220 @@ static void sanitize_config(void) {
     }
 }
 
-static void load_config_file(const char *path) {
+static void expand_home_path(const char *in, char *out, size_t outsz) {
+    if (!in || !out || outsz == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    if (in[0] != '~') {
+        snprintf(out, outsz, "%s", in);
+        return;
+    }
+
+    const char *home = getenv("HOME");
+    if (!home || home[0] == '\0') {
+        snprintf(out, outsz, "%s", in);
+        return;
+    }
+
+    if (in[1] == '\0') {
+        snprintf(out, outsz, "%s", home);
+        return;
+    }
+
+    if (in[1] == '/') {
+        snprintf(out, outsz, "%s%s", home, in + 1);
+        return;
+    }
+
+    /* Unsupported: ~otheruser/path */
+    snprintf(out, outsz, "%s", in);
+}
+
+static void dir_from_path(const char *path, char *out, size_t outsz) {
+    if (!path || !out || outsz == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        snprintf(out, outsz, ".");
+        return;
+    }
+
+    size_t len = (size_t)(slash - path);
+    if (len == 0) {
+        snprintf(out, outsz, "/");
+        return;
+    }
+
+    if (len >= outsz) {
+        len = outsz - 1;
+    }
+
+    memcpy(out, path, len);
+    out[len] = '\0';
+}
+
+static void resolve_include_path(const char *base_path, const char *include_path, char *out, size_t outsz) {
+    if (!include_path || !out || outsz == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+
+    char expanded[CONFIG_PATH_MAX];
+    expand_home_path(include_path, expanded, sizeof(expanded));
+
+    if (expanded[0] == '/') {
+        snprintf(out, outsz, "%s", expanded);
+        return;
+    }
+
+    char base_expanded[CONFIG_PATH_MAX];
+    expand_home_path(base_path ? base_path : "", base_expanded, sizeof(base_expanded));
+
+    char base_dir[CONFIG_PATH_MAX];
+    dir_from_path(base_expanded, base_dir, sizeof(base_dir));
+
+    snprintf(out, outsz, "%s/%s", base_dir, expanded);
+}
+
+static size_t split_command_argv(const char *src, char storage[CMD_MAX_ARGS][256], const char **argv, size_t max_args) {
+    if (!src || !argv || !storage || max_args == 0) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < max_args; i++) {
+        argv[i] = NULL;
+        storage[i][0] = '\0';
+    }
+
+    size_t argc = 0;
+    const char *p = src;
+
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+
+        if (!*p) {
+            break;
+        }
+
+        if (argc + 1 >= max_args) {
+            break;
+        }
+
+        char *dst = storage[argc];
+        size_t di = 0;
+        bool in_single = false;
+        bool in_double = false;
+
+        while (*p) {
+            unsigned char ch = (unsigned char)*p;
+
+            if (!in_single && !in_double && isspace(ch)) {
+                break;
+            }
+
+            if (!in_double && ch == '\'') {
+                in_single = !in_single;
+                p++;
+                continue;
+            }
+
+            if (!in_single && ch == '"') {
+                in_double = !in_double;
+                p++;
+                continue;
+            }
+
+            if (ch == '\\') {
+                p++;
+                if (!*p) {
+                    break;
+                }
+                ch = (unsigned char)*p;
+            }
+
+            if (di + 1 < 256) {
+                dst[di++] = (char)ch;
+            }
+
+            p++;
+        }
+
+        dst[di] = '\0';
+
+        if (dst[0] != '\0') {
+            argv[argc++] = dst;
+        }
+
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+    }
+
+    argv[argc] = NULL;
+    return argc;
+}
+
+static bool split_config_kv(char *line, char **key_out, char **val_out) {
+    if (!line || !key_out || !val_out) {
+        return false;
+    }
+
+    *key_out = NULL;
+    *val_out = NULL;
+
+    char *p = trim_whitespace(line);
+    if (*p == '\0') {
+        return false;
+    }
+
+    char *key = p;
+    while (*p && !isspace((unsigned char)*p)) {
+        p++;
+    }
+
+    if (*p == '\0') {
+        return false;
+    }
+
+    *p = '\0';
+    p++;
+
+    char *val = trim_whitespace(p);
+    if (*val == '\0') {
+        return false;
+    }
+
+    *key_out = key;
+    *val_out = val;
+    return true;
+}
+
+static void load_config_file_recursive(const char *path, int depth) {
     if (!path || path[0] == '\0') {
         return;
     }
 
-    FILE *fp = fopen(path, "r");
+    if (depth > CONFIG_INCLUDE_MAX_DEPTH) {
+        fprintf(stderr, "vwm: config include depth exceeded while loading %s\n", path);
+        return;
+    }
+
+    char resolved_path[CONFIG_PATH_MAX];
+    expand_home_path(path, resolved_path, sizeof(resolved_path));
+
+    FILE *fp = fopen(resolved_path, "r");
     if (!fp) {
+        fprintf(stderr, "vwm: could not open config file: %s\n", resolved_path);
         return;
     }
 
@@ -2340,48 +2619,53 @@ static void load_config_file(const char *path) {
             continue;
         }
 
-        char *eq = strchr(raw, '=');
-        if (!eq) {
+        char *key = NULL;
+        char *val = NULL;
+        if (!split_config_kv(raw, &key, &val)) {
             continue;
         }
 
-        *eq = '\0';
-        char *key = trim_whitespace(raw);
-        char *val = trim_whitespace(eq + 1);
+        if (strcmp(key, "include") == 0) {
+            config_unquote_inplace(val);
 
-        if (*key == '\0' || *val == '\0') {
+            char include_path[CONFIG_PATH_MAX];
+            resolve_include_path(resolved_path, val, include_path, sizeof(include_path));
+
+            if (strcmp(include_path, resolved_path) == 0) {
+                fprintf(stderr, "vwm: skipping self-include: %s\n", include_path);
+                continue;
+            }
+
+            load_config_file_recursive(include_path, depth + 1);
             continue;
         }
 
         if (strcmp(key, "terminal") == 0) {
-            toml_unquote_inplace(val);
+            config_unquote_inplace(val);
             snprintf(wm.config.terminal, sizeof(wm.config.terminal), "%s", val);
-            snprintf(wm.config.terminal_arg0, sizeof(wm.config.terminal_arg0), "%s", val);
             continue;
         }
 
         if (strcmp(key, "launcher") == 0) {
-            toml_unquote_inplace(val);
+            config_unquote_inplace(val);
             snprintf(wm.config.launcher, sizeof(wm.config.launcher), "%s", val);
-            snprintf(wm.config.launcher_arg0, sizeof(wm.config.launcher_arg0), "%s", val);
             continue;
         }
 
         if (strcmp(key, "scratchpad") == 0) {
-            toml_unquote_inplace(val);
+            config_unquote_inplace(val);
             snprintf(wm.config.scratchpad, sizeof(wm.config.scratchpad), "%s", val);
-            snprintf(wm.config.scratchpad_arg0, sizeof(wm.config.scratchpad_arg0), "%s", val);
             continue;
         }
 
         if (strcmp(key, "scratchpad_class") == 0) {
-            toml_unquote_inplace(val);
-            snprintf(wm.config.scratchpad_arg2, sizeof(wm.config.scratchpad_arg2), "%s", val);
+            config_unquote_inplace(val);
+            snprintf(wm.config.scratchpad_class, sizeof(wm.config.scratchpad_class), "%s", val);
             continue;
         }
 
-        if (strcmp(key, "font") == 0) {
-            toml_unquote_inplace(val);
+        if (strcmp(key, "font") == 0 || strcmp(key, "font_family") == 0) {
+            config_unquote_inplace(val);
             snprintf(wm.config.font_family, sizeof(wm.config.font_family), "%s", val);
             continue;
         }
@@ -2446,12 +2730,6 @@ static void load_config_file(const char *path) {
             continue;
         }
 
-        if (strcmp(key, "font_family") == 0) {
-            toml_unquote_inplace(val);
-            snprintf(wm.config.font_family, sizeof(wm.config.font_family), "%s", val);
-            continue;
-        }
-
         if (strcmp(key, "font_size") == 0) {
             wm.config.font_size = strtof(val, NULL);
             continue;
@@ -2485,10 +2763,16 @@ static void load_config_file(const char *path) {
             }
             continue;
         }
+
+        fprintf(stderr, "vwm: unknown config key '%s' in %s\n", key, resolved_path);
     }
 
     fclose(fp);
     rebuild_config_commands();
+}
+
+static void load_config_file(const char *path) {
+    load_config_file_recursive(path, 0);
 }
 
 static void load_default_config(void) {
@@ -2497,7 +2781,7 @@ static void load_default_config(void) {
     snprintf(
         wm.config.path,
         sizeof(wm.config.path),
-        "%s/.config/vwm/config.toml",
+        "%s/.config/vwm/vwm.conf",
         getenv("HOME") ? getenv("HOME") : ""
     );
 
@@ -2519,14 +2803,9 @@ static void load_default_config(void) {
 
     snprintf(wm.config.font_family, sizeof(wm.config.font_family), "monospace");
     snprintf(wm.config.terminal, sizeof(wm.config.terminal), "kitty");
-    snprintf(wm.config.launcher, sizeof(wm.config.launcher), "dmenu_run");
+    snprintf(wm.config.launcher, sizeof(wm.config.launcher), "rofi -show drun");
     snprintf(wm.config.scratchpad, sizeof(wm.config.scratchpad), "kitty");
-
-    snprintf(wm.config.terminal_arg0, sizeof(wm.config.terminal_arg0), "%s", wm.config.terminal);
-    snprintf(wm.config.launcher_arg0, sizeof(wm.config.launcher_arg0), "%s", wm.config.launcher);
-    snprintf(wm.config.scratchpad_arg0, sizeof(wm.config.scratchpad_arg0), "%s", wm.config.scratchpad);
-    snprintf(wm.config.scratchpad_arg1, sizeof(wm.config.scratchpad_arg1), "--class");
-    snprintf(wm.config.scratchpad_arg2, sizeof(wm.config.scratchpad_arg2), "vwm-scratchpad");
+    snprintf(wm.config.scratchpad_class, sizeof(wm.config.scratchpad_class), "vwm-scratchpad");
 
     rebuild_config_commands();
     init_default_keybinds();

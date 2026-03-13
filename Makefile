@@ -2,23 +2,27 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
 CC ?= cc
-CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
-CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L
 PKG_CONFIG ?= pkg-config
 
-PKGS = x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig
-LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS)) -lXrender
-CFLAGS += $(shell $(PKG_CONFIG) --cflags $(PKGS))
+TARGET := vwm
+SRC := vwm.c
 
-TARGET = vwm
-SRC = vwm.c
+WARN_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic
+OPT_CFLAGS ?= -O2
+CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L
+CFLAGS ?=
+LDFLAGS ?=
 
-.PHONY: all clean install uninstall run reload check
+PKGS := x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig
+PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS))
+PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS)) -lXrender
+
+.PHONY: all clean install uninstall reload check
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC) $(LIBS)
+	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(OPT_CFLAGS) $(CFLAGS) $(PKG_CFLAGS) -o $@ $(SRC) $(LDFLAGS) $(PKG_LIBS)
 
 clean:
 	rm -f $(TARGET)
@@ -30,11 +34,8 @@ install: $(TARGET)
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/$(TARGET)"
 
-run: $(TARGET)
-	./$(TARGET)
-
 reload:
-	pkill -HUP vwm
+	pkill -x -HUP vwm
 
 check:
 	@echo "Checking build dependencies with pkg-config..."
