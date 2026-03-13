@@ -211,7 +211,7 @@ launcher rofi -show drun
 scratchpad kitty
 scratchpad_class vwm-scratchpad
 
-font_family JetBrainsMono Nerd Font
+font_family FiraCode Nerd Font
 font_size 11
 
 gap_px 10
@@ -315,7 +315,7 @@ The status bar uses **Xft** for font rendering.
 Example:
 
 ```conf
-font_family JetBrainsMono Nerd Font
+font_family FiraCode Nerd Font
 font_size 11
 ```
 
