@@ -27,6 +27,8 @@ vwm focuses on:
 
 ## Video demonstration
 
+I haven't recorded a video yet lol
+
 ![Watch the demo](assets/demo.mp4)
 
 ---
