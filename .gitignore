@@ -1,3 +1,4 @@
 vwm
+/build/
 *.o
 *.log

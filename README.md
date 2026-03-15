@@ -143,8 +143,7 @@ If the example config does not already exist in your home directory, you can cop
 
 ```bash
 mkdir -p ~/.config/vwm
-cp examples/config.conf ~/.config/vwm/config.conf
-cp examples/theme.conf ~/.config/vwm/theme.conf
+cp example/theme.conf ~/.config/vwm/theme.conf
 ```
 
 ---
@@ -186,13 +185,13 @@ If using a display manager, the installed desktop entry should allow vwm to appe
 vwm is configured using a simple config file located at:
 
 ```text
-~/.config/vwm/config.conf
+~/.config/vwm/vwm.conf
 ```
 
 A default example config is included in:
 
 ```text
-examples/config.conf
+example/vwm.conf
 ```
 
 The config format is intentionally minimal and kitty-like:
@@ -243,7 +242,7 @@ This makes it easy to keep a stable base config while swapping theme files or ge
 Example layout:
 
 ```text
-~/.config/vwm/config.conf
+~/.config/vwm/vwm.conf
 ~/.config/vwm/theme.conf
 ```
 
