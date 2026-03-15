@@ -1,8 +1,34 @@
 #include "client.h"
 
 #include "bar.h"
+#include "config.h"
 #include "layout.h"
 #include "util.h"
+
+static bool window_matches_float_rule(xcb_window_t win) {
+    xcb_icccm_get_wm_class_reply_t reply;
+
+    if (!xcb_icccm_get_wm_class_reply(
+            wm.conn,
+            xcb_icccm_get_wm_class(wm.conn, win),
+            &reply,
+            NULL)) {
+        return false;
+    }
+
+    bool matched = false;
+
+    if (reply.instance_name && class_should_float(reply.instance_name)) {
+        matched = true;
+    }
+
+    if (!matched && reply.class_name && class_should_float(reply.class_name)) {
+        matched = true;
+    }
+
+    xcb_icccm_get_wm_class_reply_wipe(&reply);
+    return matched;
+}
 
 Workspace *ws_of(Monitor *m, int idx) {
     if (!m || idx < 0 || idx >= WORKSPACE_COUNT) {
@@ -143,6 +169,7 @@ void focus_client(Client *c) {
 
     uint32_t inactive[] = { wm.config.border_inactive };
     uint32_t active[] = { wm.config.border_active };
+    uint32_t stack_above[] = { XCB_STACK_MODE_ABOVE };
 
     for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
@@ -166,6 +193,14 @@ void focus_client(Client *c) {
     if (!c->is_fullscreen) {
         xcb_change_window_attributes(wm.conn, c->win, XCB_CW_BORDER_PIXEL, active);
     }
+
+    xcb_configure_window(
+        wm.conn,
+        c->win,
+        XCB_CONFIG_WINDOW_STACK_MODE,
+        stack_above
+    );
+
     xcb_set_input_focus(wm.conn, XCB_INPUT_FOCUS_POINTER_ROOT, c->win, XCB_CURRENT_TIME);
 
     if (wm.net_active_window != XCB_ATOM_NONE) {
@@ -248,173 +283,6 @@ void focus_workspace(Monitor *m) {
     focus_client(c);
 }
 
-void manage_window(xcb_window_t win) {
-    if (!wm.selmon) {
-        return;
-    }
-
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        if (win == m->barwin) {
-            return;
-        }
-    }
-
-    if (find_client(win)) {
-        return;
-    }
-
-    xcb_get_window_attributes_cookie_t attr_cookie =
-        xcb_get_window_attributes(wm.conn, win);
-    xcb_get_window_attributes_reply_t *attr =
-        xcb_get_window_attributes_reply(wm.conn, attr_cookie, NULL);
-
-    if (!attr) {
-        return;
-    }
-
-    if (attr->override_redirect) {
-        free(attr);
-        return;
-    }
-
-    free(attr);
-
-    Client *c = calloc(1, sizeof(*c));
-    if (!c) {
-        die("calloc client failed");
-    }
-
-    c->win = win;
-    c->mon = wm.selmon;
-    c->ws = ws_of(wm.selmon, wm.selmon->current_ws);
-    c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
-    c->old_frame = c->frame;
-
-    if (wm.scratchpad_spawn_pending) {
-        c->is_scratchpad = true;
-        c->is_floating = true;
-        c->is_hidden = false;
-        wm.scratchpad = c;
-        wm.scratchpad_spawn_pending = false;
-    }
-
-    uint32_t values[] = {
-        wm.config.border_inactive,
-        XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE,
-    };
-
-    xcb_change_window_attributes(
-        wm.conn,
-        win,
-        XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK,
-        values
-    );
-
-    attach_client(c->ws, c);
-
-    if (c->is_scratchpad || c->is_floating) {
-        center_client_on_monitor(c, c->mon);
-    }
-
-    xcb_map_window(wm.conn, win);
-    layout_monitor(c->mon);
-    focus_client(c);
-}
-
-void unmanage_client(Client *c) {
-    if (!c || !c->ws) {
-        return;
-    }
-
-    Workspace *ws = c->ws;
-    Monitor *m = c->mon;
-
-    if (c->prev) {
-        c->prev->next = c->next;
-    } else {
-        ws->clients = c->next;
-    }
-
-    if (c->next) {
-        c->next->prev = c->prev;
-    }
-
-    if (ws->focused == c) {
-        ws->focused = NULL;
-    }
-
-    if (m && m->focused == c) {
-        m->focused = NULL;
-    }
-
-    if (wm.scratchpad == c) {
-        wm.scratchpad = NULL;
-        wm.scratchpad_spawn_pending = false;
-    }
-
-    free(c);
-
-    if (m) {
-        layout_monitor(m);
-    }
-}
-
-Client *find_client(xcb_window_t win) {
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        for (int i = 0; i < WORKSPACE_COUNT; i++) {
-            for (Client *c = m->workspaces[i].clients; c; c = c->next) {
-                if (c->win == win) {
-                    return c;
-                }
-            }
-        }
-    }
-    return NULL;
-}
-
-void scan_existing_windows(void) {
-    xcb_query_tree_cookie_t ck = xcb_query_tree(wm.conn, wm.root);
-    xcb_query_tree_reply_t *reply = xcb_query_tree_reply(wm.conn, ck, NULL);
-    if (!reply) {
-        return;
-    }
-
-    int len = xcb_query_tree_children_length(reply);
-    xcb_window_t *wins = xcb_query_tree_children(reply);
-
-    for (int i = 0; i < len; i++) {
-        bool skip = false;
-
-        for (Monitor *m = wm.mons; m; m = m->next) {
-            if (wins[i] == m->barwin) {
-                skip = true;
-                break;
-            }
-        }
-
-        if (skip) {
-            continue;
-        }
-
-        xcb_get_window_attributes_cookie_t attr_cookie = xcb_get_window_attributes(wm.conn, wins[i]);
-        xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(wm.conn, attr_cookie, NULL);
-
-        if (!attr) {
-            continue;
-        }
-
-        bool should_manage = !attr->override_redirect && attr->map_state == XCB_MAP_STATE_VIEWABLE;
-
-        free(attr);
-
-        if (should_manage) {
-            manage_window(wins[i]);
-        }
-    }
-
-    free(reply);
-}
-
 void detach_from_workspace(Client *c) {
     if (!c || !c->ws) {
         return;
@@ -494,5 +362,176 @@ void move_client_to_monitor(Client *c, Monitor *dst) {
 
     layout_monitor(old_mon);
     layout_monitor(dst);
+    focus_client(c);
+}
+
+Client *find_client(xcb_window_t win) {
+    for (Monitor *m = wm.mons; m; m = m->next) {
+        for (int i = 0; i < WORKSPACE_COUNT; i++) {
+            for (Client *c = m->workspaces[i].clients; c; c = c->next) {
+                if (c->win == win) {
+                    return c;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+void scan_existing_windows(void) {
+    xcb_query_tree_cookie_t ck = xcb_query_tree(wm.conn, wm.root);
+    xcb_query_tree_reply_t *reply = xcb_query_tree_reply(wm.conn, ck, NULL);
+    if (!reply) {
+        return;
+    }
+
+    int len = xcb_query_tree_children_length(reply);
+    xcb_window_t *wins = xcb_query_tree_children(reply);
+
+    for (int i = 0; i < len; i++) {
+        bool skip = false;
+
+        for (Monitor *m = wm.mons; m; m = m->next) {
+            if (wins[i] == m->barwin) {
+                skip = true;
+                break;
+            }
+        }
+
+        if (skip) {
+            continue;
+        }
+
+        xcb_get_window_attributes_cookie_t attr_cookie = xcb_get_window_attributes(wm.conn, wins[i]);
+        xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(wm.conn, attr_cookie, NULL);
+
+        if (!attr) {
+            continue;
+        }
+
+        bool should_manage = !attr->override_redirect && attr->map_state == XCB_MAP_STATE_VIEWABLE;
+
+        free(attr);
+
+        if (should_manage) {
+            manage_window(wins[i]);
+        }
+    }
+
+    free(reply);
+}
+
+void unmanage_client(Client *c) {
+    if (!c || !c->ws) {
+        return;
+    }
+
+    Workspace *ws = c->ws;
+    Monitor *m = c->mon;
+
+    if (c->prev) {
+        c->prev->next = c->next;
+    } else {
+        ws->clients = c->next;
+    }
+
+    if (c->next) {
+        c->next->prev = c->prev;
+    }
+
+    if (ws->focused == c) {
+        ws->focused = NULL;
+    }
+
+    if (m && m->focused == c) {
+        m->focused = NULL;
+    }
+
+    if (wm.scratchpad == c) {
+        wm.scratchpad = NULL;
+        wm.scratchpad_spawn_pending = false;
+    }
+
+    free(c);
+
+    if (m) {
+        layout_monitor(m);
+    }
+}
+
+void manage_window(xcb_window_t win) {
+    if (!wm.selmon) {
+        return;
+    }
+
+    for (Monitor *m = wm.mons; m; m = m->next) {
+        if (win == m->barwin) {
+            return;
+        }
+    }
+
+    if (find_client(win)) {
+        return;
+    }
+
+    xcb_get_window_attributes_cookie_t attr_cookie =
+        xcb_get_window_attributes(wm.conn, win);
+    xcb_get_window_attributes_reply_t *attr =
+        xcb_get_window_attributes_reply(wm.conn, attr_cookie, NULL);
+
+    if (!attr) {
+        return;
+    }
+
+    if (attr->override_redirect) {
+        free(attr);
+        return;
+    }
+
+    free(attr);
+
+    Client *c = calloc(1, sizeof(*c));
+    if (!c) {
+        die("calloc client failed");
+    }
+
+    c->win = win;
+    c->mon = wm.selmon;
+    c->ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
+    c->old_frame = c->frame;
+
+    if (wm.scratchpad_spawn_pending) {
+        c->is_scratchpad = true;
+        c->is_floating = true;
+        c->is_hidden = false;
+        wm.scratchpad = c;
+        wm.scratchpad_spawn_pending = false;
+    }
+
+    if (window_matches_float_rule(win)) {
+        c->is_floating = true;
+    }
+
+    uint32_t values[] = {
+        wm.config.border_inactive,
+        XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE,
+    };
+
+    xcb_change_window_attributes(
+        wm.conn,
+        win,
+        XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK,
+        values
+    );
+
+    attach_client(c->ws, c);
+
+    if (c->is_scratchpad || c->is_floating) {
+        center_client_on_monitor(c, c->mon);
+    }
+
+    xcb_map_window(wm.conn, win);
+    layout_monitor(c->mon);
     focus_client(c);
 }

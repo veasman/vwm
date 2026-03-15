@@ -21,6 +21,7 @@ void toggle_sync_workspaces(const void *arg);
 void set_client_fullscreen_state(Client *c, bool enabled);
 void toggle_fullscreen(const void *arg);
 void toggle_scratchpad(const void *arg);
+void toggle_named_scratchpad(const char *name);
 
 bool client_supports_protocol(Client *c, xcb_atom_t protocol);
 void send_wm_delete(Client *c);

@@ -239,4 +239,9 @@ extern WM wm;
 extern volatile sig_atomic_t g_should_exit;
 extern volatile sig_atomic_t g_should_reload;
 
+typedef struct {
+    char name[64];
+    const char **argv;
+} CommandRef;
+
 #endif

@@ -1,7 +1,12 @@
 #include "bar.h"
 
 #include "client.h"
+#include "config.h"
 #include "util.h"
+
+#include <time.h>
+
+static time_t g_last_bar_tick = 0;
 
 void free_xft_resources(void) {
     if (!wm.dpy) {
@@ -279,6 +284,158 @@ void draw_workspace_dots(Monitor *m, XftDraw *draw, int start_x, int baseline, i
     }
 }
 
+static void trim_trailing_whitespace(char *s) {
+    if (!s) {
+        return;
+    }
+
+    size_t len = strlen(s);
+    while (len > 0) {
+        unsigned char c = (unsigned char)s[len - 1];
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
+            s[len - 1] = '\0';
+            len--;
+        } else {
+            break;
+        }
+    }
+}
+
+static void read_custom_command(const char *cmd, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) {
+        return;
+    }
+
+    buf[0] = '\0';
+
+    if (!cmd || !*cmd) {
+        return;
+    }
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        return;
+    }
+
+    if (fgets(buf, (int)buflen, fp)) {
+        trim_trailing_whitespace(buf);
+    }
+
+    pclose(fp);
+}
+
+static void build_clock_text(const char *fmt, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) {
+        return;
+    }
+
+    buf[0] = '\0';
+
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+
+    const char *use_fmt = (fmt && *fmt) ? fmt : "%H:%M";
+    strftime(buf, buflen, use_fmt, &tmv);
+}
+
+static void build_module_text(Monitor *m, BarModule *mod, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) {
+        return;
+    }
+
+    buf[0] = '\0';
+
+    if (!m || !mod) {
+        return;
+    }
+
+    Workspace *ws = ws_of(m, m->current_ws);
+
+    switch (mod->kind) {
+        case BAR_MOD_MONITOR:
+            snprintf(buf, buflen, "M%d%s", m->id + 1, (m == wm.selmon) ? "*" : "");
+            break;
+        case BAR_MOD_SYNC:
+            snprintf(buf, buflen, "%s", wm.config.sync_workspaces ? "S" : "L");
+            break;
+        case BAR_MOD_TITLE:
+            get_client_title(ws ? ws->focused : NULL, buf, buflen);
+            break;
+        case BAR_MOD_STATUS:
+            get_root_status_text(buf, buflen);
+            break;
+        case BAR_MOD_CLOCK:
+            build_clock_text(mod->arg, buf, buflen);
+            break;
+        case BAR_MOD_CUSTOM:
+            read_custom_command(mod->arg, buf, buflen);
+            break;
+        default:
+            break;
+    }
+}
+
+static int module_width_px(Monitor *m, BarModule *mod) {
+    if (!m || !mod) {
+        return 0;
+    }
+
+    if (mod->kind == BAR_MOD_WORKSPACES) {
+        return WORKSPACE_COUNT * 16;
+    }
+
+    char buf[512];
+    build_module_text(m, mod, buf, sizeof(buf));
+    return text_width_px(buf);
+}
+
+static void draw_module(Monitor *m, BarModule *mod, XftDraw *draw, int x, int baseline, int max_width) {
+    if (!m || !mod || !draw || max_width <= 0) {
+        return;
+    }
+
+    if (mod->kind == BAR_MOD_WORKSPACES) {
+        int step = 16;
+        draw_workspace_dots(m, draw, x, baseline, step);
+        return;
+    }
+
+    char raw[512];
+    char shown[512];
+    build_module_text(m, mod, raw, sizeof(raw));
+
+    if (raw[0] == '\0') {
+        return;
+    }
+
+    utf8_truncate_to_width(raw, max_width, shown, sizeof(shown));
+    if (shown[0] == '\0') {
+        return;
+    }
+
+    draw_utf8(draw, &wm.xft_bar_fg, x, baseline, shown);
+}
+
+static void ensure_default_bar_modules(void) {
+    if (dynconfig.bar_left_count == 0 &&
+        dynconfig.bar_center_count == 0 &&
+        dynconfig.bar_right_count == 0) {
+        dynconfig.bar_left[0].kind = BAR_MOD_MONITOR;
+        dynconfig.bar_left[1].kind = BAR_MOD_SYNC;
+        dynconfig.bar_left[2].kind = BAR_MOD_WORKSPACES;
+        dynconfig.bar_left_count = 3;
+
+        dynconfig.bar_center[0].kind = BAR_MOD_TITLE;
+        dynconfig.bar_center_count = 1;
+
+        dynconfig.bar_right[0].kind = BAR_MOD_STATUS;
+        dynconfig.bar_right[1].kind = BAR_MOD_CLOCK;
+        snprintf(dynconfig.bar_right[1].arg, sizeof(dynconfig.bar_right[1].arg), "%s", "%H:%M");
+        dynconfig.bar_right_count = 2;
+    }
+}
+
 void draw_bar(Monitor *m) {
     if (!m || !m->barwin) {
         return;
@@ -289,16 +446,7 @@ void draw_bar(Monitor *m) {
         return;
     }
 
-    char raw_title[512];
-    char title[512];
-    char status[512];
-    char monlabel[32];
-    char sync_label[4];
-
-    get_client_title(ws->focused, raw_title, sizeof(raw_title));
-    get_root_status_text(status, sizeof(status));
-    snprintf(monlabel, sizeof(monlabel), "M%d%s", m->id + 1, (m == wm.selmon) ? "*" : "");
-    snprintf(sync_label, sizeof(sync_label), "%s", wm.config.sync_workspaces ? "S" : "L");
+    ensure_default_bar_modules();
 
     xcb_get_geometry_cookie_t gck = xcb_get_geometry(wm.conn, m->barwin);
     xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(wm.conn, gck, NULL);
@@ -325,107 +473,70 @@ void draw_bar(Monitor *m) {
     }
 
     GC gc = XCreateGC(wm.dpy, pix, 0, NULL);
-
     XftDrawRect(draw, &wm.xft_bar_bg, 0, 0, (unsigned int)bar_w, (unsigned int)bar_h);
 
     const int baseline = bar_text_baseline();
     const int left_pad = 8;
     const int right_pad = 8;
-    const int section_gap = 10;
     const int item_gap = 10;
 
-    int dot_step = 16;
-    if (bar_w < 700) dot_step = 14;
-    if (bar_w < 520) dot_step = 12;
-    if (bar_w < 380) dot_step = 10;
-
-    int dots_w = WORKSPACE_COUNT * dot_step;
-    int mon_w = text_width_px(monlabel);
-    int sync_w = text_width_px(sync_label);
-    int status_w = text_width_px(status);
-
-    bool show_mon = true;
-    bool show_sync = true;
-    bool show_status = true;
-    bool show_title = true;
-
-    int left_cluster_w = left_pad + dots_w;
-    int extra_left = 0;
-
-    if (show_sync) {
-        extra_left += item_gap + sync_w;
-    }
-    if (show_mon) {
-        extra_left += item_gap + mon_w;
-    }
-
-    left_cluster_w += extra_left;
-
-    int title_start = left_cluster_w + section_gap;
-    int right_reserved = right_pad + (show_status && status[0] ? status_w + section_gap : 0);
-    int title_space = bar_w - title_start - right_reserved;
-
-    if (title_space < 120) {
-        show_title = false;
-    }
-
-    if (bar_w < 520) {
-        show_status = false;
-        right_reserved = right_pad;
-        title_space = bar_w - title_start - right_reserved;
-        if (title_space < 120) {
-            show_title = false;
+    int left_x = left_pad;
+    for (size_t i = 0; i < dynconfig.bar_left_count; i++) {
+        int w = module_width_px(m, &dynconfig.bar_left[i]);
+        if (w <= 0) {
+            continue;
         }
+        draw_module(m, &dynconfig.bar_left[i], draw, left_x, baseline, w);
+        left_x += w + item_gap;
     }
 
-    if (bar_w < 420) {
-        show_mon = false;
-        left_cluster_w = left_pad + dots_w + (show_sync ? item_gap + sync_w : 0);
-        title_start = left_cluster_w + section_gap;
-        right_reserved = right_pad + (show_status && status[0] ? status_w + section_gap : 0);
-        title_space = bar_w - title_start - right_reserved;
-        if (title_space < 120) {
-            show_title = false;
+    int right_x = bar_w - right_pad;
+    for (size_t idx = dynconfig.bar_right_count; idx > 0; idx--) {
+        BarModule *mod = &dynconfig.bar_right[idx - 1];
+        int w = module_width_px(m, mod);
+        if (w <= 0) {
+            continue;
         }
+        right_x -= w;
+        draw_module(m, mod, draw, right_x, baseline, w);
+        right_x -= item_gap;
     }
 
-    if (bar_w < 320) {
-        show_sync = false;
-        left_cluster_w = left_pad + dots_w;
-        title_start = left_cluster_w + section_gap;
-        right_reserved = right_pad + (show_status && status[0] ? status_w + section_gap : 0);
-        title_space = bar_w - title_start - right_reserved;
-        show_title = false;
-        show_status = false;
-    }
+    int center_left_bound = left_x;
+    int center_right_bound = right_x;
+    int center_width = center_right_bound - center_left_bound;
 
-    title[0] = '\0';
-    if (show_title && title_space > 24) {
-        utf8_truncate_to_width(raw_title, title_space, title, sizeof(title));
-    }
+    if (center_width > 20 && dynconfig.bar_center_count > 0) {
+        int total_center_w = 0;
+        for (size_t i = 0; i < dynconfig.bar_center_count; i++) {
+            int w = module_width_px(m, &dynconfig.bar_center[i]);
+            if (w > 0) {
+                total_center_w += w;
+                if (i + 1 < dynconfig.bar_center_count) {
+                    total_center_w += item_gap;
+                }
+            }
+        }
 
-    int x = left_pad;
+        int start_x = center_left_bound + MAX(0, (center_width - total_center_w) / 2);
+        if (start_x < center_left_bound) {
+            start_x = center_left_bound;
+        }
 
-    if (show_mon) {
-        draw_utf8(draw, &wm.xft_bar_fg, x, baseline, monlabel);
-        x += mon_w + item_gap;
-    }
+        int x = start_x;
+        for (size_t i = 0; i < dynconfig.bar_center_count; i++) {
+            int available = center_right_bound - x;
+            if (available <= 0) {
+                break;
+            }
 
-    if (show_sync) {
-        draw_utf8(draw, &wm.xft_bar_fg, x, baseline, sync_label);
-        x += sync_w + item_gap;
-    }
+            int preferred = module_width_px(m, &dynconfig.bar_center[i]);
+            int draw_w = MIN(preferred, available);
 
-    draw_workspace_dots(m, draw, x, baseline, dot_step);
-
-    if (show_title && title[0]) {
-        draw_utf8(draw, &wm.xft_bar_fg, title_start, baseline, title);
-    }
-
-    if (show_status && status[0]) {
-        int status_x = bar_w - right_pad - status_w;
-        if (status_x > title_start + 20) {
-            draw_utf8(draw, &wm.xft_bar_fg, status_x, baseline, status);
+            if (draw_w > 0) {
+                draw_module(m, &dynconfig.bar_center[i], draw, x, baseline, draw_w);
+                x += draw_w + item_gap;
+            }
         }
     }
 
@@ -451,5 +562,13 @@ void draw_bar(Monitor *m) {
 void draw_all_bars(void) {
     for (Monitor *m = wm.mons; m; m = m->next) {
         draw_bar(m);
+    }
+}
+
+void bar_tick(void) {
+    time_t now = time(NULL);
+    if (now != g_last_bar_tick) {
+        g_last_bar_tick = now;
+        draw_all_bars();
     }
 }

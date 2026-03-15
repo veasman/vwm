@@ -77,6 +77,8 @@ void event_loop(void) {
             free(ev);
         }
 
+        bar_tick();
+
         struct pollfd pfd = {
             .fd = fd,
             .events = POLLIN,

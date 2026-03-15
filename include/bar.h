@@ -23,5 +23,6 @@ int bar_text_baseline(void);
 void draw_workspace_dots(Monitor *m, XftDraw *draw, int start_x, int baseline, int step_px);
 void draw_bar(Monitor *m);
 void draw_all_bars(void);
+void bar_tick(void);
 
 #endif

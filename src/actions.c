@@ -5,7 +5,85 @@
 #include "config.h"
 #include "layout.h"
 
-static const char *launcher_fallback[] = {"rofi -show drun", NULL};
+static const char *launcher_fallback[] = {"rofi", "-show", "drun", NULL};
+
+static bool ascii_case_equal_local(const char *a, const char *b) {
+    if (!a || !b) {
+        return false;
+    }
+
+    while (*a && *b) {
+        unsigned char ca = (unsigned char)*a;
+        unsigned char cb = (unsigned char)*b;
+
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+
+        if (ca != cb) {
+            return false;
+        }
+
+        a++;
+        b++;
+    }
+
+    return *a == '\0' && *b == '\0';
+}
+
+static bool window_has_class(xcb_window_t win, const char *wanted) {
+    if (!wanted || !*wanted) {
+        return false;
+    }
+
+    xcb_icccm_get_wm_class_reply_t reply;
+    if (!xcb_icccm_get_wm_class_reply(
+            wm.conn,
+            xcb_icccm_get_wm_class(wm.conn, win),
+            &reply,
+            NULL)) {
+        return false;
+    }
+
+    bool matched = false;
+
+    if (reply.instance_name && ascii_case_equal_local(reply.instance_name, wanted)) {
+        matched = true;
+    }
+
+    if (!matched && reply.class_name && ascii_case_equal_local(reply.class_name, wanted)) {
+        matched = true;
+    }
+
+    xcb_icccm_get_wm_class_reply_wipe(&reply);
+    return matched;
+}
+
+static Client *find_client_by_class_name(const char *class_name) {
+    if (!class_name || !*class_name) {
+        return NULL;
+    }
+
+    for (Monitor *m = wm.mons; m; m = m->next) {
+        for (int i = 0; i < WORKSPACE_COUNT; i++) {
+            for (Client *c = m->workspaces[i].clients; c; c = c->next) {
+                if (window_has_class(c->win, class_name)) {
+                    return c;
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static void raise_client_above(Client *c) {
+    if (!c) {
+        return;
+    }
+
+    uint32_t values[] = { XCB_STACK_MODE_ABOVE };
+    xcb_configure_window(wm.conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE, values);
+}
 
 static void set_monitor_workspace(Monitor *m, int idx) {
     if (!m || idx < 0 || idx >= WORKSPACE_COUNT || m->current_ws == idx) {
@@ -312,9 +390,68 @@ void toggle_scratchpad(const void *arg) {
     c->mon = wm.selmon;
     c->is_hidden = false;
     c->is_floating = true;
+    c->is_scratchpad = true;
 
     center_client_on_monitor(c, wm.selmon);
     xcb_map_window(wm.conn, c->win);
+    raise_client_above(c);
+    layout_monitor(wm.selmon);
+    focus_client(c);
+}
+
+void toggle_named_scratchpad(const char *name) {
+    if (!wm.selmon || !name || !*name) {
+        return;
+    }
+
+    DynamicScratchpad *sp = find_dynamic_scratchpad(name);
+    if (!sp) {
+        fprintf(stderr, "vwm: unknown scratchpad '%s'\n", name);
+        return;
+    }
+
+    Client *c = NULL;
+    if (sp->class_name[0] != '\0') {
+        c = find_client_by_class_name(sp->class_name);
+    }
+
+    if (!c) {
+        wm.scratchpad_spawn_pending = true;
+        spawn(sp->argv);
+        return;
+    }
+
+    Workspace *target_ws = ws_of(wm.selmon, wm.selmon->current_ws);
+
+    if (!c->is_hidden && c->mon == wm.selmon && c->ws == target_ws) {
+        c->is_hidden = true;
+        xcb_unmap_window(wm.conn, c->win);
+
+        if (c->ws && c->ws->focused == c) {
+            c->ws->focused = NULL;
+        }
+        if (c->mon && c->mon->focused == c) {
+            c->mon->focused = NULL;
+        }
+
+        layout_monitor(wm.selmon);
+        return;
+    }
+
+    if (c->ws != target_ws) {
+        detach_from_workspace(c);
+        c->ws = target_ws;
+        attach_client(target_ws, c);
+    }
+
+    c->mon = wm.selmon;
+    c->is_hidden = false;
+    c->is_floating = true;
+    c->is_scratchpad = true;
+
+    center_client_on_monitor(c, wm.selmon);
+    xcb_map_window(wm.conn, c->win);
+    raise_client_above(c);
     layout_monitor(wm.selmon);
     focus_client(c);
 }

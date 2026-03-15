@@ -3,6 +3,7 @@
 #include "actions.h"
 #include "bar.h"
 #include "client.h"
+#include "config.h"
 #include "layout.h"
 #include "util.h"
 
@@ -245,6 +246,29 @@ void grab_keys(void) {
         free(code);
     }
 
+    for (size_t k = 0; k < dynconfig.keybind_count; k++) {
+        code = xcb_key_symbols_get_keycode(symbols, dynconfig.keybinds[k].sym);
+        if (!code) {
+            continue;
+        }
+
+        for (int i = 0; code[i] != XCB_NO_SYMBOL; i++) {
+            for (size_t m = 0; m < LENGTH(masks); m++) {
+                xcb_grab_key(
+                    wm.conn,
+                    1,
+                    wm.root,
+                    dynconfig.keybinds[k].mod | masks[m],
+                    code[i],
+                    XCB_GRAB_MODE_ASYNC,
+                    XCB_GRAB_MODE_ASYNC
+                );
+            }
+        }
+
+        free(code);
+    }
+
     xcb_key_symbols_free(symbols);
 }
 
@@ -293,6 +317,11 @@ void key_press(xcb_generic_event_t *gev) {
 
     xcb_keysym_t sym = xcb_key_symbols_get_keysym(symbols, ev->detail, 0);
     uint16_t cleaned = ev->state & ~(XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2);
+
+    if (execute_dynamic_keybind(sym, cleaned)) {
+        xcb_key_symbols_free(symbols);
+        return;
+    }
 
     for (size_t i = 0; i < wm.config.keybind_count; i++) {
         Keybind *kb = &wm.config.keybinds[i];
