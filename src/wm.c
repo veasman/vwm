@@ -85,7 +85,7 @@ void event_loop(void) {
             .revents = 0
         };
 
-        poll(&pfd, 1, 100);
+        poll(&pfd, 1, 25);
     }
 }
 

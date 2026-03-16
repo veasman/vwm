@@ -30,7 +30,7 @@ CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -I$(INC_DIR)
 CFLAGS ?=
 LDFLAGS ?=
 
-PKGS := x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig
+PKGS := x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig cairo cairo-xlib
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS))
 PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS)) -lXrender
 
@@ -51,14 +51,10 @@ clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
 
 install: $(TARGET)
-	install -d "$(DESTDIR)$(BINDIR)"
-	install -d "$(DESTDIR)$(DATADIR)"
-	install -m 755 "$(TARGET)" "$(DESTDIR)$(BINDIR)/$(TARGET)"
-	install -m 644 example/vwm.conf "$(DESTDIR)$(DATADIR)/vwm.conf"
+	./install.sh
 
 uninstall:
-	rm -f "$(DESTDIR)$(BINDIR)/$(TARGET)"
-	rm -f "$(DESTDIR)$(DATADIR)/vwm.conf"
+	./uninstall.sh
 
 run: $(TARGET)
 	./$(TARGET)

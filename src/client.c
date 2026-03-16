@@ -5,31 +5,6 @@
 #include "layout.h"
 #include "util.h"
 
-static bool window_matches_float_rule(xcb_window_t win) {
-    xcb_icccm_get_wm_class_reply_t reply;
-
-    if (!xcb_icccm_get_wm_class_reply(
-            wm.conn,
-            xcb_icccm_get_wm_class(wm.conn, win),
-            &reply,
-            NULL)) {
-        return false;
-    }
-
-    bool matched = false;
-
-    if (reply.instance_name && class_should_float(reply.instance_name)) {
-        matched = true;
-    }
-
-    if (!matched && reply.class_name && class_should_float(reply.class_name)) {
-        matched = true;
-    }
-
-    xcb_icccm_get_wm_class_reply_wipe(&reply);
-    return matched;
-}
-
 Workspace *ws_of(Monitor *m, int idx) {
     if (!m || idx < 0 || idx >= WORKSPACE_COUNT) {
         return NULL;
@@ -509,8 +484,30 @@ void manage_window(xcb_window_t win) {
         wm.scratchpad_spawn_pending = false;
     }
 
-    if (window_matches_float_rule(win)) {
-        c->is_floating = true;
+    xcb_icccm_get_wm_class_reply_t class_reply;
+    bool have_class = xcb_icccm_get_wm_class_reply(
+        wm.conn,
+        xcb_icccm_get_wm_class(wm.conn, win),
+        &class_reply,
+        NULL
+    );
+
+    if (have_class) {
+        if ((class_reply.instance_name && class_should_float(class_reply.instance_name)) ||
+            (class_reply.class_name && class_should_float(class_reply.class_name))) {
+            c->is_floating = true;
+        }
+
+        int rule_ws = -1;
+        if (class_reply.instance_name) {
+            rule_ws = class_workspace_rule(class_reply.instance_name);
+        }
+        if (rule_ws < 0 && class_reply.class_name) {
+            rule_ws = class_workspace_rule(class_reply.class_name);
+        }
+        if (rule_ws >= 0) {
+            c->ws = ws_of(wm.selmon, rule_ws);
+        }
     }
 
     uint32_t values[] = {
@@ -527,11 +524,21 @@ void manage_window(xcb_window_t win) {
 
     attach_client(c->ws, c);
 
+    if (have_class) {
+        xcb_icccm_get_wm_class_reply_wipe(&class_reply);
+    }
+
     if (c->is_scratchpad || c->is_floating) {
         center_client_on_monitor(c, c->mon);
     }
 
     xcb_map_window(wm.conn, win);
+
     layout_monitor(c->mon);
-    focus_client(c);
+
+    if (c->ws == ws_of(c->mon, c->mon->current_ws)) {
+        focus_client(c);
+    } else {
+        draw_all_bars();
+    }
 }

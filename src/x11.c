@@ -34,9 +34,17 @@ void create_bar(Monitor *m) {
     }
 
     int outer = MAX(0, wm.config.bar_outer_gap);
-    int bar_x = m->geom.x + outer;
-    int bar_y = m->geom.y + outer;
-    int bar_w = MAX(1, m->geom.w - outer * 2);
+    int extra_x = 0;
+    int extra_y = 0;
+
+    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
+        extra_x = MAX(0, dynconfig.bar_theme.floating_margin_x);
+        extra_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
+    }
+
+    int bar_x = m->geom.x + outer + extra_x;
+    int bar_y = m->geom.y + outer + extra_y;
+    int bar_w = MAX(1, m->geom.w - ((outer + extra_x) * 2));
 
     uint32_t values[] = {
         wm.config.bar_bg,
@@ -60,6 +68,60 @@ void create_bar(Monitor *m) {
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_OVERRIDE_REDIRECT,
         values
     );
+
+    xcb_atom_t atom_net_wm_window_type = intern_atom("_NET_WM_WINDOW_TYPE");
+    xcb_atom_t atom_net_wm_window_type_dock = intern_atom("_NET_WM_WINDOW_TYPE_DOCK");
+    xcb_atom_t atom_net_wm_state = intern_atom("_NET_WM_STATE");
+    xcb_atom_t atom_net_wm_state_above = intern_atom("_NET_WM_STATE_ABOVE");
+    xcb_atom_t atom_net_wm_state_sticky = intern_atom("_NET_WM_STATE_STICKY");
+    xcb_atom_t atom_net_wm_state_skip_taskbar = intern_atom("_NET_WM_STATE_SKIP_TASKBAR");
+    xcb_atom_t atom_net_wm_state_skip_pager = intern_atom("_NET_WM_STATE_SKIP_PAGER");
+
+    if (atom_net_wm_window_type != XCB_ATOM_NONE &&
+        atom_net_wm_window_type_dock != XCB_ATOM_NONE) {
+        xcb_change_property(
+            wm.conn,
+            XCB_PROP_MODE_REPLACE,
+            m->barwin,
+            atom_net_wm_window_type,
+            XCB_ATOM_ATOM,
+            32,
+            1,
+            &atom_net_wm_window_type_dock
+        );
+    }
+
+    if (atom_net_wm_state != XCB_ATOM_NONE) {
+        xcb_atom_t states[4];
+        int n = 0;
+
+        if (atom_net_wm_state_above != XCB_ATOM_NONE) {
+            states[n++] = atom_net_wm_state_above;
+        }
+        if (atom_net_wm_state_sticky != XCB_ATOM_NONE) {
+            states[n++] = atom_net_wm_state_sticky;
+        }
+        if (atom_net_wm_state_skip_taskbar != XCB_ATOM_NONE) {
+            states[n++] = atom_net_wm_state_skip_taskbar;
+        }
+        if (atom_net_wm_state_skip_pager != XCB_ATOM_NONE) {
+            states[n++] = atom_net_wm_state_skip_pager;
+        }
+
+        if (n > 0) {
+            xcb_change_property(
+                wm.conn,
+                XCB_PROP_MODE_REPLACE,
+                m->barwin,
+                atom_net_wm_state,
+                XCB_ATOM_ATOM,
+                32,
+                (uint32_t)n,
+                states
+            );
+        }
+    }
+
     xcb_map_window(wm.conn, m->barwin);
 
     update_monitor_workarea(m);

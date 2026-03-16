@@ -2,6 +2,7 @@
 
 #include "bar.h"
 #include "client.h"
+#include "config.h"
 #include "x11.h"
 
 uint32_t border_width_for_client(Client *c) {
@@ -76,6 +77,11 @@ void update_monitor_workarea(Monitor *m) {
     Workspace *ws = ws_of(m, m->current_ws);
     bool hide_bar = ws ? ws->hide_bar : false;
     int outer = MAX(0, wm.config.bar_outer_gap);
+    int extra_y = 0;
+
+    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
+        extra_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
+    }
 
     if (hide_bar) {
         xcb_unmap_window(wm.conn, m->barwin);
@@ -85,10 +91,11 @@ void update_monitor_workarea(Monitor *m) {
         m->work.h = m->geom.h;
     } else {
         xcb_map_window(wm.conn, m->barwin);
+
         m->work.x = m->geom.x;
-        m->work.y = m->geom.y + outer + wm.config.bar_height;
+        m->work.y = m->geom.y + outer + extra_y + wm.config.bar_height;
         m->work.w = m->geom.w;
-        m->work.h = MAX(0, m->geom.h - outer - wm.config.bar_height);
+        m->work.h = MAX(0, m->geom.h - (outer + extra_y + wm.config.bar_height));
     }
 }
 

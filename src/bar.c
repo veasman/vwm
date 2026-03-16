@@ -6,7 +6,11 @@
 
 #include <time.h>
 
-static time_t g_last_bar_tick = 0;
+typedef struct {
+    bool valid;
+    bool muted;
+    int percent;
+} VolumeState;
 
 void free_xft_resources(void) {
     if (!wm.dpy) {
@@ -151,13 +155,15 @@ int text_width_px(const char *s) {
 }
 
 void draw_utf8(XftDraw *draw, XftColor *color, int x, int y, const char *s) {
-    if (!draw || !color || !s || !*s) {
+    if (!draw || !s || !*s) {
         return;
     }
 
+    XftColor *use = color ? color : &wm.xft_bar_fg;
+
     XftDrawStringUtf8(
         draw,
-        color,
+        use,
         wm.xft_font,
         x,
         y,
@@ -259,6 +265,7 @@ void utf8_truncate_to_width(const char *src, int max_width, char *dst, size_t ds
 
 void draw_workspace_dots(Monitor *m, XftDraw *draw, int start_x, int baseline, int step_px) {
     int x = start_x;
+    int step = step_px > 0 ? step_px : (wm.font_char_width + 4);
 
     for (int i = 0; i < WORKSPACE_COUNT; i++) {
         Workspace *ws = &m->workspaces[i];
@@ -280,7 +287,7 @@ void draw_workspace_dots(Monitor *m, XftDraw *draw, int start_x, int baseline, i
         }
 
         draw_utf8(draw, color, x, baseline, glyph);
-        x += step_px;
+        x += step;
     }
 }
 
@@ -339,6 +346,60 @@ static void build_clock_text(const char *fmt, char *buf, size_t buflen) {
     strftime(buf, buflen, use_fmt, &tmv);
 }
 
+static VolumeState get_volume_state(void) {
+    VolumeState st = {0};
+
+    FILE *fp = popen("wpctl get-volume @DEFAULT_AUDIO_SINK@", "r");
+    if (!fp) {
+        return st;
+    }
+
+    char line[256];
+    line[0] = '\0';
+
+    if (!fgets(line, sizeof(line), fp)) {
+        pclose(fp);
+        return st;
+    }
+
+    pclose(fp);
+    trim_trailing_whitespace(line);
+
+    st.valid = true;
+    st.muted = (strstr(line, "MUTED") != NULL);
+
+    char *last_space = strrchr(line, ' ');
+    if (last_space && *(last_space + 1)) {
+        double volume = atof(last_space + 1);
+        st.percent = (int)(volume * 100.0 + 0.5);
+        if (st.percent < 0) st.percent = 0;
+        if (st.percent > 150) st.percent = 150;
+    }
+
+    return st;
+}
+
+static const char *volume_icon_for_state(VolumeState st) {
+    if (!st.valid) return "󰖁";
+    if (st.muted || st.percent == 0) return "󰖁";
+    if (st.percent < 35) return "󰕿";
+    if (st.percent < 70) return "󰖀";
+    return "󰕾";
+}
+
+static uint32_t volume_fill_color(VolumeState st) {
+    if (!st.valid || st.muted) {
+        return dynconfig.bar_theme.volume_bar_fg_muted;
+    }
+    if (st.percent < 35) {
+        return dynconfig.bar_theme.volume_bar_fg_low;
+    }
+    if (st.percent < 70) {
+        return dynconfig.bar_theme.volume_bar_fg_mid;
+    }
+    return dynconfig.bar_theme.volume_bar_fg_high;
+}
+
 static void build_module_text(Monitor *m, BarModule *mod, char *buf, size_t buflen) {
     if (!buf || buflen == 0) {
         return;
@@ -356,48 +417,252 @@ static void build_module_text(Monitor *m, BarModule *mod, char *buf, size_t bufl
         case BAR_MOD_MONITOR:
             snprintf(buf, buflen, "M%d%s", m->id + 1, (m == wm.selmon) ? "*" : "");
             break;
+
         case BAR_MOD_SYNC:
             snprintf(buf, buflen, "%s", wm.config.sync_workspaces ? "S" : "L");
             break;
+
         case BAR_MOD_TITLE:
             get_client_title(ws ? ws->focused : NULL, buf, buflen);
             break;
+
         case BAR_MOD_STATUS:
             get_root_status_text(buf, buflen);
             break;
+
         case BAR_MOD_CLOCK:
-            build_clock_text(mod->arg, buf, buflen);
+            build_clock_text(mod->arg[0] ? mod->arg : "%H:%M", buf, buflen);
             break;
+
         case BAR_MOD_CUSTOM:
             read_custom_command(mod->arg, buf, buflen);
             break;
+
+        case BAR_MOD_VOLUME: {
+            VolumeState st = get_volume_state();
+            if (!st.valid) {
+                snprintf(buf, buflen, "󰖁 ?");
+                break;
+            }
+
+            const char *icon = volume_icon_for_state(st);
+            if (st.muted) {
+                snprintf(buf, buflen, "%s muted", icon);
+            } else {
+                snprintf(buf, buflen, "%s %d%%", icon, st.percent);
+            }
+            break;
+        }
+
         default:
             break;
     }
 }
 
+static int module_padding_x(void) {
+    return dynconfig.bar_theme.mode == BAR_STYLE_FLOATING
+        ? MAX(0, dynconfig.bar_theme.module_padding_x)
+        : 0;
+}
+
+static int module_padding_y(void) {
+    return dynconfig.bar_theme.mode == BAR_STYLE_FLOATING
+        ? MAX(0, dynconfig.bar_theme.module_padding_y)
+        : 0;
+}
+
+static int module_gap_px(void) {
+    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
+        return MAX(0, dynconfig.bar_theme.module_gap);
+    }
+    return 10;
+}
+
+static void fill_round_rect(Display *dpy, Drawable d, GC gc, int x, int y, unsigned int w, unsigned int h, unsigned int r) {
+    if (!dpy || !gc || w == 0 || h == 0) {
+        return;
+    }
+
+    if (r == 0) {
+        XFillRectangle(dpy, d, gc, x, y, w, h);
+        return;
+    }
+
+    unsigned int rr = r;
+    if (rr * 2 > w) rr = w / 2;
+    if (rr * 2 > h) rr = h / 2;
+
+    if (rr == 0) {
+        XFillRectangle(dpy, d, gc, x, y, w, h);
+        return;
+    }
+
+    unsigned int dia = rr * 2;
+
+    if (w > dia) {
+        XFillRectangle(dpy, d, gc, x + (int)rr, y, w - dia, h);
+    }
+    if (h > dia) {
+        XFillRectangle(dpy, d, gc, x, y + (int)rr, w, h - dia);
+    }
+
+    XFillArc(dpy, d, gc, x, y, dia, dia, 90 * 64, 90 * 64);
+    XFillArc(dpy, d, gc, x + (int)w - (int)dia, y, dia, dia, 0, 90 * 64);
+    XFillArc(dpy, d, gc, x, y + (int)h - (int)dia, dia, dia, 180 * 64, 90 * 64);
+    XFillArc(dpy, d, gc, x + (int)w - (int)dia, y + (int)h - (int)dia, dia, dia, 270 * 64, 90 * 64);
+}
+
+static void draw_module_background(Pixmap pix, GC gc, int x, int y, int w, int h) {
+    if (dynconfig.bar_theme.mode != BAR_STYLE_FLOATING) {
+        return;
+    }
+
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    XSetForeground(wm.dpy, gc, dynconfig.bar_theme.module_bg);
+    fill_round_rect(
+        wm.dpy,
+        pix,
+        gc,
+        x,
+        y,
+        (unsigned int)w,
+        (unsigned int)h,
+        (unsigned int)MAX(0, dynconfig.bar_theme.module_radius)
+    );
+}
+
 static int module_width_px(Monitor *m, BarModule *mod) {
+    int content_w = 0;
+
     if (!m || !mod) {
         return 0;
     }
 
     if (mod->kind == BAR_MOD_WORKSPACES) {
-        return WORKSPACE_COUNT * 16;
+        int step = wm.font_char_width + 4;
+        int glyph_w = text_width_px("●");
+        if (glyph_w <= 0) {
+            glyph_w = wm.font_char_width;
+        }
+        content_w = ((WORKSPACE_COUNT - 1) * step) + glyph_w;
+    } else {
+        char buf[512];
+        build_module_text(m, mod, buf, sizeof(buf));
+        content_w = text_width_px(buf);
+
+        if (mod->kind == BAR_MOD_VOLUME && dynconfig.bar_theme.volume_bar_enabled) {
+            content_w += 8 + MAX(0, dynconfig.bar_theme.volume_bar_width);
+        }
     }
 
-    char buf[512];
-    build_module_text(m, mod, buf, sizeof(buf));
-    return text_width_px(buf);
+    if (content_w <= 0) {
+        return 0;
+    }
+
+    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
+        content_w += module_padding_x() * 2;
+    }
+
+    return content_w;
 }
 
-static void draw_module(Monitor *m, BarModule *mod, XftDraw *draw, int x, int baseline, int max_width) {
-    if (!m || !mod || !draw || max_width <= 0) {
+static void draw_module(Monitor *m, BarModule *mod, XftDraw *draw, Pixmap pix, GC gc, int x, int baseline, int bar_h, int width) {
+    if (!m || !mod || !draw || width <= 0) {
         return;
     }
 
+    int pad_x = module_padding_x();
+    int pad_y = module_padding_y();
+
+    int box_h = bar_h;
+    int box_y = 0;
+    int local_baseline = baseline;
+
+    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
+        box_h = wm.font_height + (pad_y * 2);
+        box_h = MIN(bar_h, MAX(1, box_h));
+        box_y = (bar_h - box_h) / 2;
+
+        draw_module_background(pix, gc, x, box_y, width, box_h);
+
+        local_baseline = box_y + ((box_h - wm.font_height) / 2) + wm.font_ascent;
+    }
+
+    int text_x = x + pad_x;
+
     if (mod->kind == BAR_MOD_WORKSPACES) {
-        int step = 16;
-        draw_workspace_dots(m, draw, x, baseline, step);
+        int step = wm.font_char_width + 4;
+        draw_workspace_dots(m, draw, text_x, local_baseline, step);
+        return;
+    }
+
+    if (mod->kind == BAR_MOD_VOLUME) {
+        VolumeState st = get_volume_state();
+
+        char raw[256];
+        char shown[256];
+        build_module_text(m, mod, raw, sizeof(raw));
+
+        int bar_w = 0;
+        int bar_h_px = 0;
+        int bar_radius = 0;
+        int text_available = width - (pad_x * 2);
+
+        if (dynconfig.bar_theme.volume_bar_enabled) {
+            bar_w = MAX(0, dynconfig.bar_theme.volume_bar_width);
+            bar_h_px = MAX(1, dynconfig.bar_theme.volume_bar_height);
+            bar_radius = MAX(0, dynconfig.bar_theme.volume_bar_radius);
+            text_available -= (bar_w + 8);
+        }
+
+        if (text_available > 0) {
+            utf8_truncate_to_width(raw, text_available, shown, sizeof(shown));
+            if (shown[0] != '\0') {
+                draw_utf8(draw, &wm.xft_bar_fg, text_x, local_baseline, shown);
+            }
+        }
+
+        if (dynconfig.bar_theme.volume_bar_enabled && bar_w > 0) {
+            int text_w = text_width_px(shown);
+            int bx = text_x + MAX(0, text_w) + 8;
+            int by = box_y + (box_h - bar_h_px) / 2;
+
+            XSetForeground(wm.dpy, gc, dynconfig.bar_theme.volume_bar_bg);
+            fill_round_rect(
+                wm.dpy,
+                pix,
+                gc,
+                bx,
+                by,
+                (unsigned int)bar_w,
+                (unsigned int)bar_h_px,
+                (unsigned int)bar_radius
+            );
+
+            int pct = st.valid ? st.percent : 0;
+            if (st.muted) pct = 0;
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+
+            int fill_w = (bar_w * pct) / 100;
+            if (fill_w > 0) {
+                XSetForeground(wm.dpy, gc, volume_fill_color(st));
+                fill_round_rect(
+                    wm.dpy,
+                    pix,
+                    gc,
+                    bx,
+                    by,
+                    (unsigned int)fill_w,
+                    (unsigned int)bar_h_px,
+                    (unsigned int)bar_radius
+                );
+            }
+        }
+
         return;
     }
 
@@ -409,12 +674,17 @@ static void draw_module(Monitor *m, BarModule *mod, XftDraw *draw, int x, int ba
         return;
     }
 
-    utf8_truncate_to_width(raw, max_width, shown, sizeof(shown));
+    int available = width - (pad_x * 2);
+    if (available <= 0) {
+        return;
+    }
+
+    utf8_truncate_to_width(raw, available, shown, sizeof(shown));
     if (shown[0] == '\0') {
         return;
     }
 
-    draw_utf8(draw, &wm.xft_bar_fg, x, baseline, shown);
+    draw_utf8(draw, &wm.xft_bar_fg, text_x, local_baseline, shown);
 }
 
 static void ensure_default_bar_modules(void) {
@@ -429,9 +699,9 @@ static void ensure_default_bar_modules(void) {
         dynconfig.bar_center[0].kind = BAR_MOD_TITLE;
         dynconfig.bar_center_count = 1;
 
-        dynconfig.bar_right[0].kind = BAR_MOD_STATUS;
+        dynconfig.bar_right[0].kind = BAR_MOD_VOLUME;
         dynconfig.bar_right[1].kind = BAR_MOD_CLOCK;
-        snprintf(dynconfig.bar_right[1].arg, sizeof(dynconfig.bar_right[1].arg), "%s", "%H:%M");
+        snprintf(dynconfig.bar_right[1].arg, sizeof(dynconfig.bar_right[1].arg), "%s", "%Y-%m-%d %H:%M");
         dynconfig.bar_right_count = 2;
     }
 }
@@ -473,12 +743,14 @@ void draw_bar(Monitor *m) {
     }
 
     GC gc = XCreateGC(wm.dpy, pix, 0, NULL);
-    XftDrawRect(draw, &wm.xft_bar_bg, 0, 0, (unsigned int)bar_w, (unsigned int)bar_h);
+
+    XSetForeground(wm.dpy, gc, wm.config.bar_bg);
+    XFillRectangle(wm.dpy, pix, gc, 0, 0, (unsigned int)bar_w, (unsigned int)bar_h);
 
     const int baseline = bar_text_baseline();
     const int left_pad = 8;
     const int right_pad = 8;
-    const int item_gap = 10;
+    const int item_gap = dynconfig.bar_theme.mode == BAR_STYLE_FLOATING ? module_gap_px() : 10;
 
     int left_x = left_pad;
     for (size_t i = 0; i < dynconfig.bar_left_count; i++) {
@@ -486,7 +758,7 @@ void draw_bar(Monitor *m) {
         if (w <= 0) {
             continue;
         }
-        draw_module(m, &dynconfig.bar_left[i], draw, left_x, baseline, w);
+        draw_module(m, &dynconfig.bar_left[i], draw, pix, gc, left_x, baseline, bar_h, w);
         left_x += w + item_gap;
     }
 
@@ -498,15 +770,11 @@ void draw_bar(Monitor *m) {
             continue;
         }
         right_x -= w;
-        draw_module(m, mod, draw, right_x, baseline, w);
+        draw_module(m, mod, draw, pix, gc, right_x, baseline, bar_h, w);
         right_x -= item_gap;
     }
 
-    int center_left_bound = left_x;
-    int center_right_bound = right_x;
-    int center_width = center_right_bound - center_left_bound;
-
-    if (center_width > 20 && dynconfig.bar_center_count > 0) {
+    if (dynconfig.bar_center_count > 0) {
         int total_center_w = 0;
         for (size_t i = 0; i < dynconfig.bar_center_count; i++) {
             int w = module_width_px(m, &dynconfig.bar_center[i]);
@@ -518,25 +786,36 @@ void draw_bar(Monitor *m) {
             }
         }
 
-        int start_x = center_left_bound + MAX(0, (center_width - total_center_w) / 2);
-        if (start_x < center_left_bound) {
-            start_x = center_left_bound;
+        int start_x = (bar_w - total_center_w) / 2;
+        int min_x = left_x + item_gap;
+        int max_x = right_x - item_gap - total_center_w;
+
+        if (start_x < min_x) {
+            start_x = min_x;
+        }
+        if (start_x > max_x) {
+            start_x = max_x;
         }
 
         int x = start_x;
         for (size_t i = 0; i < dynconfig.bar_center_count; i++) {
-            int available = center_right_bound - x;
+            int preferred = module_width_px(m, &dynconfig.bar_center[i]);
+            if (preferred <= 0) {
+                continue;
+            }
+
+            int available = right_x - item_gap - x;
             if (available <= 0) {
                 break;
             }
 
-            int preferred = module_width_px(m, &dynconfig.bar_center[i]);
             int draw_w = MIN(preferred, available);
-
-            if (draw_w > 0) {
-                draw_module(m, &dynconfig.bar_center[i], draw, x, baseline, draw_w);
-                x += draw_w + item_gap;
+            if (draw_w <= 0) {
+                break;
             }
+
+            draw_module(m, &dynconfig.bar_center[i], draw, pix, gc, x, baseline, bar_h, draw_w);
+            x += draw_w + item_gap;
         }
     }
 
@@ -566,9 +845,15 @@ void draw_all_bars(void) {
 }
 
 void bar_tick(void) {
-    time_t now = time(NULL);
-    if (now != g_last_bar_tick) {
-        g_last_bar_tick = now;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    time_t now_ms = (time_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    static time_t last_ms = 0;
+
+    if (now_ms - last_ms >= 150) {
+        last_ms = now_ms;
+        update_status_cache();
         draw_all_bars();
     }
 }
