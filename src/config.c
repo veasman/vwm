@@ -9,6 +9,18 @@
 
 DynamicConfig dynconfig = {0};
 
+typedef enum {
+    CFG_BLOCK_NONE = 0,
+    CFG_BLOCK_GENERAL,
+    CFG_BLOCK_COLORS,
+    CFG_BLOCK_BAR,
+    CFG_BLOCK_RULES,
+    CFG_BLOCK_COMMANDS,
+    CFG_BLOCK_SCRATCHPADS,
+    CFG_BLOCK_BINDS,
+    CFG_BLOCK_MODULES,
+} ConfigBlock;
+
 static bool ascii_case_equal(const char *a, const char *b) {
     if (!a || !b) {
         return false;
@@ -30,6 +42,16 @@ static bool ascii_case_equal(const char *a, const char *b) {
     }
 
     return *a == '\0' && *b == '\0';
+}
+
+static void clear_bar_modules(void) {
+    dynconfig.bar_left_count = 0;
+    dynconfig.bar_center_count = 0;
+    dynconfig.bar_right_count = 0;
+
+    memset(dynconfig.bar_left, 0, sizeof(dynconfig.bar_left));
+    memset(dynconfig.bar_center, 0, sizeof(dynconfig.bar_center));
+    memset(dynconfig.bar_right, 0, sizeof(dynconfig.bar_right));
 }
 
 static void add_float_rule(const char *class_name) {
@@ -66,7 +88,7 @@ static void add_workspace_rule(int workspace, const char *class_name) {
     }
 
     if (workspace < 0 || workspace >= WORKSPACE_COUNT) {
-        fprintf(stderr, "vwm: invalid workspace_rule target %d\n", workspace + 1);
+        fprintf(stderr, "vwm: invalid workspace rule target %d\n", workspace + 1);
         return;
     }
 
@@ -127,13 +149,22 @@ static bool add_dynamic_command(const char *name, const char *cmdline) {
         return false;
     }
 
-    if (dynconfig.command_count >= MAX_DYNAMIC_COMMANDS) {
-        fprintf(stderr, "vwm: too many commands, ignoring '%s'\n", name);
-        return false;
+    DynamicCommand *existing = find_dynamic_command(name);
+    if (existing) {
+        memset(existing->storage, 0, sizeof(existing->storage));
+        memset(existing->argv, 0, sizeof(existing->argv));
+        split_command_argv(cmdline, existing->storage, existing->argv, CMD_MAX_ARGS);
+
+        if (!existing->argv[0]) {
+            fprintf(stderr, "vwm: command '%s' has empty argv\n", name);
+            return false;
+        }
+
+        return true;
     }
 
-    if (find_dynamic_command(name)) {
-        fprintf(stderr, "vwm: duplicate command '%s', ignoring later definition\n", name);
+    if (dynconfig.command_count >= MAX_DYNAMIC_COMMANDS) {
+        fprintf(stderr, "vwm: too many commands, ignoring '%s'\n", name);
         return false;
     }
 
@@ -181,12 +212,16 @@ static bool add_dynamic_scratchpad(const char *name, const char *cmdline) {
         return false;
     }
 
-    if (find_dynamic_scratchpad(name)) {
-        fprintf(stderr, "vwm: duplicate scratchpad '%s', ignoring later definition\n", name);
-        return false;
+    DynamicScratchpad *sp = find_dynamic_scratchpad(name);
+    if (sp) {
+        memset(sp->storage, 0, sizeof(sp->storage));
+        memset(sp->argv, 0, sizeof(sp->argv));
+        split_command_argv(cmdline, sp->storage, sp->argv, CMD_MAX_ARGS);
+        extract_class_from_argv(sp->argv, sp->class_name, sizeof(sp->class_name));
+        return sp->argv[0] != NULL;
     }
 
-    DynamicScratchpad *sp = &dynconfig.scratchpads[dynconfig.scratchpad_count++];
+    sp = &dynconfig.scratchpads[dynconfig.scratchpad_count++];
     memset(sp, 0, sizeof(*sp));
 
     snprintf(sp->name, sizeof(sp->name), "%s", name);
@@ -199,11 +234,27 @@ static bool add_dynamic_scratchpad(const char *name, const char *cmdline) {
     }
 
     extract_class_from_argv(sp->argv, sp->class_name, sizeof(sp->class_name));
+    return true;
+}
 
-    if (sp->class_name[0] == '\0') {
-        fprintf(stderr, "vwm: scratchpad '%s' should include --class <name>\n", name);
+static bool set_dynamic_scratchpad_class(const char *name, const char *class_name) {
+    if (!name || !*name || !class_name || !*class_name) {
+        return false;
     }
 
+    DynamicScratchpad *sp = find_dynamic_scratchpad(name);
+    if (!sp) {
+        if (dynconfig.scratchpad_count >= MAX_DYNAMIC_SCRATCHPADS) {
+            fprintf(stderr, "vwm: too many scratchpads, ignoring '%s'\n", name);
+            return false;
+        }
+
+        sp = &dynconfig.scratchpads[dynconfig.scratchpad_count++];
+        memset(sp, 0, sizeof(*sp));
+        snprintf(sp->name, sizeof(sp->name), "%s", name);
+    }
+
+    snprintf(sp->class_name, sizeof(sp->class_name), "%s", class_name);
     return true;
 }
 
@@ -407,204 +458,6 @@ bool execute_dynamic_keybind(xcb_keysym_t sym, uint16_t mod) {
     return false;
 }
 
-static bool parse_bar_module_kind(const char *name, BarModuleKind *out) {
-    if (!name || !out) {
-        return false;
-    }
-
-    if (strcmp(name, "workspaces") == 0) { *out = BAR_MOD_WORKSPACES; return true; }
-    if (strcmp(name, "monitor") == 0) { *out = BAR_MOD_MONITOR; return true; }
-    if (strcmp(name, "sync") == 0) { *out = BAR_MOD_SYNC; return true; }
-    if (strcmp(name, "title") == 0) { *out = BAR_MOD_TITLE; return true; }
-    if (strcmp(name, "status") == 0) { *out = BAR_MOD_STATUS; return true; }
-    if (strcmp(name, "clock") == 0) { *out = BAR_MOD_CLOCK; return true; }
-    if (strcmp(name, "custom") == 0) { *out = BAR_MOD_CUSTOM; return true; }
-    if (strcmp(name, "volume") == 0) { *out = BAR_MOD_VOLUME; return true; }
-
-    return false;
-}
-
-static bool parse_bar_style_value(const char *name, BarStyleMode *out) {
-    if (!name || !out) {
-        return false;
-    }
-
-    if (strcmp(name, "flat") == 0) {
-        *out = BAR_STYLE_FLAT;
-        return true;
-    }
-
-    if (strcmp(name, "floating") == 0) {
-        *out = BAR_STYLE_FLOATING;
-        return true;
-    }
-
-    return false;
-}
-
-static void init_default_bar_theme(void) {
-    dynconfig.bar_theme.mode = BAR_STYLE_FLAT;
-    dynconfig.bar_theme.module_padding_x = 10;
-    dynconfig.bar_theme.module_padding_y = 4;
-    dynconfig.bar_theme.module_gap = 8;
-    dynconfig.bar_theme.module_radius = 12;
-
-    dynconfig.bar_theme.floating_margin_x = 24;
-    dynconfig.bar_theme.floating_margin_y = 8;
-
-    dynconfig.bar_theme.transparent_background = false;
-
-    dynconfig.bar_theme.volume_bar_enabled = true;
-    dynconfig.bar_theme.volume_bar_width = 42;
-    dynconfig.bar_theme.volume_bar_height = 6;
-    dynconfig.bar_theme.volume_bar_radius = 3;
-
-    dynconfig.bar_theme.module_bg = 0x1b1b1b;
-    dynconfig.bar_theme.module_fg = 0xd0d0d0;
-    dynconfig.bar_theme.module_border = 0x2a2a2a;
-    dynconfig.bar_theme.module_border_width = 0;
-
-    dynconfig.bar_theme.volume_bar_bg = 0x2a2a2a;
-    dynconfig.bar_theme.volume_bar_fg_low = 0x88c0d0;
-    dynconfig.bar_theme.volume_bar_fg_mid = 0xa3be8c;
-    dynconfig.bar_theme.volume_bar_fg_high = 0xebcb8b;
-    dynconfig.bar_theme.volume_bar_fg_muted = 0xbf616a;
-}
-
-static bool add_bar_module(BarModule *arr, size_t *count, const char *kind_name, const char *arg, const char *resolved_path) {
-    if (!arr || !count || !kind_name) {
-        return false;
-    }
-
-    if (*count >= MAX_BAR_MODULES_PER_SECTION) {
-        fprintf(stderr, "vwm: too many bar modules in %s\n", resolved_path);
-        return false;
-    }
-
-    BarModuleKind kind;
-    if (!parse_bar_module_kind(kind_name, &kind)) {
-        fprintf(stderr, "vwm: unknown bar module '%s' in %s\n", kind_name, resolved_path);
-        return false;
-    }
-
-    BarModule *mod = &arr[*count];
-    memset(mod, 0, sizeof(*mod));
-    mod->kind = kind;
-
-    if (arg && *arg) {
-        snprintf(mod->arg, sizeof(mod->arg), "%s", arg);
-    }
-
-    (*count)++;
-    return true;
-}
-
-void rebuild_config_commands(void) {
-    size_t argc = 0;
-
-    memset(wm.config.term_cmd_storage, 0, sizeof(wm.config.term_cmd_storage));
-    memset(wm.config.launcher_cmd_storage, 0, sizeof(wm.config.launcher_cmd_storage));
-    memset(wm.config.scratchpad_cmd_storage, 0, sizeof(wm.config.scratchpad_cmd_storage));
-
-    memset(wm.config.term_cmd, 0, sizeof(wm.config.term_cmd));
-    memset(wm.config.launcher_cmd, 0, sizeof(wm.config.launcher_cmd));
-    memset(wm.config.scratchpad_cmd, 0, sizeof(wm.config.scratchpad_cmd));
-
-    split_command_argv(
-        wm.config.terminal,
-        wm.config.term_cmd_storage,
-        wm.config.term_cmd,
-        CMD_MAX_ARGS
-    );
-
-    split_command_argv(
-        wm.config.launcher,
-        wm.config.launcher_cmd_storage,
-        wm.config.launcher_cmd,
-        CMD_MAX_ARGS
-    );
-
-    argc = split_command_argv(
-        wm.config.scratchpad,
-        wm.config.scratchpad_cmd_storage,
-        wm.config.scratchpad_cmd,
-        CMD_MAX_ARGS
-    );
-
-    if (wm.config.scratchpad_class[0] != '\0' && argc + 2 < CMD_MAX_ARGS) {
-        snprintf(
-            wm.config.scratchpad_cmd_storage[argc],
-            sizeof(wm.config.scratchpad_cmd_storage[argc]),
-            "%s",
-            "--class"
-        );
-        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
-        argc++;
-
-        snprintf(
-            wm.config.scratchpad_cmd_storage[argc],
-            sizeof(wm.config.scratchpad_cmd_storage[argc]),
-            "%s",
-            wm.config.scratchpad_class
-        );
-        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
-        argc++;
-
-        wm.config.scratchpad_cmd[argc] = NULL;
-    }
-}
-
-void init_default_keybinds(void) {
-    Keybind defaults[] = {
-        { XK_Return, MOD_MASK, ACTION_SPAWN_TERM },
-        { XK_Return, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_ZOOM_MASTER },
-        { XK_p, MOD_MASK, ACTION_SPAWN_LAUNCHER },
-        { XK_grave, MOD_MASK, ACTION_TOGGLE_SCRATCHPAD },
-
-        { XK_j, MOD_MASK, ACTION_FOCUS_NEXT },
-        { XK_k, MOD_MASK, ACTION_FOCUS_PREV },
-        { XK_h, MOD_MASK, ACTION_FOCUS_MONITOR_PREV },
-        { XK_l, MOD_MASK, ACTION_FOCUS_MONITOR_NEXT },
-
-        { XK_h, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_MONITOR_PREV },
-        { XK_l, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_MONITOR_NEXT },
-
-        { XK_bracketleft, MOD_MASK, ACTION_DECREASE_MFACT },
-        { XK_bracketright, MOD_MASK, ACTION_INCREASE_MFACT },
-
-        { XK_f, MOD_MASK, ACTION_TOGGLE_FULLSCREEN },
-        { XK_s, MOD_MASK, ACTION_TOGGLE_SYNC },
-        { XK_q, MOD_MASK, ACTION_KILL_CLIENT },
-        { XK_q, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_QUIT },
-        { XK_r, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_RELOAD_CONFIG },
-
-        { XK_1, MOD_MASK, ACTION_VIEW_WS_1 },
-        { XK_2, MOD_MASK, ACTION_VIEW_WS_2 },
-        { XK_3, MOD_MASK, ACTION_VIEW_WS_3 },
-        { XK_4, MOD_MASK, ACTION_VIEW_WS_4 },
-        { XK_5, MOD_MASK, ACTION_VIEW_WS_5 },
-        { XK_6, MOD_MASK, ACTION_VIEW_WS_6 },
-        { XK_7, MOD_MASK, ACTION_VIEW_WS_7 },
-        { XK_8, MOD_MASK, ACTION_VIEW_WS_8 },
-        { XK_9, MOD_MASK, ACTION_VIEW_WS_9 },
-
-        { XK_1, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_1 },
-        { XK_2, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_2 },
-        { XK_3, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_3 },
-        { XK_4, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_4 },
-        { XK_5, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_5 },
-        { XK_6, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_6 },
-        { XK_7, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_7 },
-        { XK_8, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_8 },
-        { XK_9, MOD_MASK | XCB_MOD_MASK_SHIFT, ACTION_SEND_WS_9 },
-    };
-
-    wm.config.keybind_count = LENGTH(defaults);
-    for (size_t i = 0; i < wm.config.keybind_count; i++) {
-        wm.config.keybinds[i] = defaults[i];
-    }
-}
-
 void strip_comment(char *s) {
     if (!s) {
         return;
@@ -647,18 +500,12 @@ bool parse_bool_value(const char *s, bool *out) {
         return false;
     }
 
-    if (strcmp(s, "1") == 0 ||
-        strcmp(s, "true") == 0 ||
-        strcmp(s, "yes") == 0 ||
-        strcmp(s, "on") == 0) {
+    if (strcmp(s, "1") == 0 || strcmp(s, "true") == 0 || strcmp(s, "yes") == 0 || strcmp(s, "on") == 0) {
         *out = true;
         return true;
     }
 
-    if (strcmp(s, "0") == 0 ||
-        strcmp(s, "false") == 0 ||
-        strcmp(s, "no") == 0 ||
-        strcmp(s, "off") == 0) {
+    if (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 || strcmp(s, "no") == 0 || strcmp(s, "off") == 0) {
         *out = false;
         return true;
     }
@@ -826,95 +673,556 @@ bool split_config_kv(char *line, char **key_out, char **val_out) {
     return true;
 }
 
-static bool parse_dynamic_command_line(char *raw, const char *resolved_path) {
-    char *rest = raw + strlen("command");
-    rest = trim_whitespace(rest);
-    if (*rest == '\0') {
-        fprintf(stderr, "vwm: invalid command line in %s\n", resolved_path);
-        return true;
+static size_t split_line_tokens(const char *src, char storage[16][256], const char **argv, size_t max_args) {
+    if (!src || !storage || !argv || max_args == 0) {
+        return 0;
     }
 
-    char *name = rest;
-    while (*rest && !isspace((unsigned char)*rest)) {
-        rest++;
+    for (size_t i = 0; i < max_args; i++) {
+        storage[i][0] = '\0';
+        argv[i] = NULL;
     }
 
-    if (*rest == '\0') {
-        fprintf(stderr, "vwm: command missing argv in %s\n", resolved_path);
-        return true;
+    size_t argc = 0;
+    const char *p = src;
+
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+
+        if (!*p) {
+            break;
+        }
+
+        if (argc + 1 >= max_args) {
+            break;
+        }
+
+        char *dst = storage[argc];
+        size_t di = 0;
+        bool in_single = false;
+        bool in_double = false;
+
+        while (*p) {
+            unsigned char ch = (unsigned char)*p;
+
+            if (!in_single && !in_double && isspace(ch)) {
+                break;
+            }
+
+            if (!in_double && ch == '\'') {
+                in_single = !in_single;
+                p++;
+                continue;
+            }
+
+            if (!in_single && ch == '"') {
+                in_double = !in_double;
+                p++;
+                continue;
+            }
+
+            if (ch == '\\') {
+                p++;
+                if (!*p) {
+                    break;
+                }
+                ch = (unsigned char)*p;
+            }
+
+            if (di + 1 < 256) {
+                dst[di++] = (char)ch;
+            }
+
+            p++;
+        }
+
+        dst[di] = '\0';
+        if (dst[0] != '\0') {
+            argv[argc++] = dst;
+        }
     }
 
-    *rest = '\0';
-    rest++;
-    rest = trim_whitespace(rest);
-    config_unquote_inplace(rest);
-
-    add_dynamic_command(name, rest);
-    return true;
+    argv[argc] = NULL;
+    return argc;
 }
 
-static bool parse_dynamic_scratchpad_line(char *raw, const char *resolved_path) {
-    char *rest = raw + strlen("scratchpad");
-    rest = trim_whitespace(rest);
-    if (*rest == '\0') {
-        fprintf(stderr, "vwm: invalid scratchpad line in %s\n", resolved_path);
-        return true;
-    }
-
-    if (*rest == '"' || *rest == '\'') {
+static bool parse_bar_module_kind(const char *name, BarModuleKind *out) {
+    if (!name || !out) {
         return false;
     }
 
-    char *name = rest;
-    while (*rest && !isspace((unsigned char)*rest)) {
-        rest++;
+    if (strcmp(name, "workspaces") == 0) { *out = BAR_MOD_WORKSPACES; return true; }
+    if (strcmp(name, "monitor") == 0) { *out = BAR_MOD_MONITOR; return true; }
+    if (strcmp(name, "sync") == 0) { *out = BAR_MOD_SYNC; return true; }
+    if (strcmp(name, "title") == 0) { *out = BAR_MOD_TITLE; return true; }
+    if (strcmp(name, "status") == 0) { *out = BAR_MOD_STATUS; return true; }
+    if (strcmp(name, "clock") == 0) { *out = BAR_MOD_CLOCK; return true; }
+    if (strcmp(name, "custom") == 0) { *out = BAR_MOD_CUSTOM; return true; }
+    if (strcmp(name, "volume") == 0) { *out = BAR_MOD_VOLUME; return true; }
+    if (strcmp(name, "network") == 0) { *out = BAR_MOD_NETWORK; return true; }
+    if (strcmp(name, "battery") == 0) { *out = BAR_MOD_BATTERY; return true; }
+
+    return false;
+}
+
+static bool parse_bar_style_value(const char *name, BarStyleMode *out) {
+    if (!name || !out) {
+        return false;
     }
 
-    if (*rest == '\0') {
-        fprintf(stderr, "vwm: scratchpad missing argv in %s\n", resolved_path);
+    if (strcmp(name, "docked") == 0 || strcmp(name, "flat") == 0) {
+        *out = BAR_STYLE_FLAT;
         return true;
     }
 
-    *rest = '\0';
-    rest++;
-    rest = trim_whitespace(rest);
-    config_unquote_inplace(rest);
+    if (strcmp(name, "floating") == 0) {
+        *out = BAR_STYLE_FLOATING;
+        return true;
+    }
 
-    add_dynamic_scratchpad(name, rest);
+    return false;
+}
+
+static bool parse_bar_presentation_value(const char *name, BarPresentationMode *out) {
+    if (!name || !out) {
+        return false;
+    }
+
+    if (strcmp(name, "minimal") == 0 || strcmp(name, "lean") == 0) {
+        *out = BAR_PRESENTATION_MINIMAL;
+        return true;
+    }
+
+    if (strcmp(name, "accent") == 0 || strcmp(name, "fancy") == 0) {
+        *out = BAR_PRESENTATION_ACCENT;
+        return true;
+    }
+
+    return false;
+}
+
+static void init_default_bar_theme(void) {
+    dynconfig.bar_theme.mode = BAR_STYLE_FLAT;
+    dynconfig.bar_theme.presentation_mode = BAR_PRESENTATION_ACCENT;
+
+    dynconfig.bar_theme.module_padding_x = 10;
+    dynconfig.bar_theme.module_padding_y = 4;
+    dynconfig.bar_theme.module_gap = 8;
+    dynconfig.bar_theme.module_radius = 12;
+
+    dynconfig.bar_theme.floating_margin_x = 24;
+    dynconfig.bar_theme.floating_margin_y = 8;
+
+    dynconfig.bar_theme.transparent_background = true;
+
+    dynconfig.bar_theme.volume_bar_enabled = true;
+    dynconfig.bar_theme.volume_bar_width = 36;
+    dynconfig.bar_theme.volume_bar_height = 8;
+    dynconfig.bar_theme.volume_bar_radius = 4;
+
+    dynconfig.bar_theme.module_bg = 0x1b1b1b;
+    dynconfig.bar_theme.module_fg = 0xd0d0d0;
+    dynconfig.bar_theme.module_border = 0x2a2a2a;
+    dynconfig.bar_theme.module_border_width = 1;
+
+    dynconfig.bar_theme.volume_bar_bg = 0x2a2a2a;
+    dynconfig.bar_theme.volume_bar_fg_low = 0x88c0d0;
+    dynconfig.bar_theme.volume_bar_fg_mid = 0xa3be8c;
+    dynconfig.bar_theme.volume_bar_fg_high = 0xebcb8b;
+    dynconfig.bar_theme.volume_bar_fg_muted = 0xbf616a;
+
+    dynconfig.bar_theme.accent_monitor = 0x88c0d0;
+    dynconfig.bar_theme.accent_sync_enabled = 0xa3be8c;
+    dynconfig.bar_theme.accent_sync_disabled = 0xebcb8b;
+
+    dynconfig.bar_theme.accent_network_up = 0x88c0d0;
+    dynconfig.bar_theme.accent_network_down = 0xbf616a;
+
+    dynconfig.bar_theme.accent_battery_full = 0xa3be8c;
+    dynconfig.bar_theme.accent_battery_charging = 0x88c0d0;
+    dynconfig.bar_theme.accent_battery_normal = 0xd0d0d0;
+    dynconfig.bar_theme.accent_battery_low = 0xebcb8b;
+    dynconfig.bar_theme.accent_battery_critical = 0xbf616a;
+
+    dynconfig.bar_theme.accent_clock = 0xd7ba7d;
+}
+
+void rebuild_config_commands(void) {
+    size_t argc = 0;
+
+    memset(wm.config.term_cmd_storage, 0, sizeof(wm.config.term_cmd_storage));
+    memset(wm.config.launcher_cmd_storage, 0, sizeof(wm.config.launcher_cmd_storage));
+    memset(wm.config.scratchpad_cmd_storage, 0, sizeof(wm.config.scratchpad_cmd_storage));
+
+    memset(wm.config.term_cmd, 0, sizeof(wm.config.term_cmd));
+    memset(wm.config.launcher_cmd, 0, sizeof(wm.config.launcher_cmd));
+    memset(wm.config.scratchpad_cmd, 0, sizeof(wm.config.scratchpad_cmd));
+
+    split_command_argv(wm.config.terminal, wm.config.term_cmd_storage, wm.config.term_cmd, CMD_MAX_ARGS);
+    split_command_argv(wm.config.launcher, wm.config.launcher_cmd_storage, wm.config.launcher_cmd, CMD_MAX_ARGS);
+
+    argc = split_command_argv(wm.config.scratchpad, wm.config.scratchpad_cmd_storage, wm.config.scratchpad_cmd, CMD_MAX_ARGS);
+
+    if (wm.config.scratchpad_class[0] != '\0' && argc + 2 < CMD_MAX_ARGS) {
+        snprintf(wm.config.scratchpad_cmd_storage[argc], sizeof(wm.config.scratchpad_cmd_storage[argc]), "%s", "--class");
+        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
+        argc++;
+
+        snprintf(wm.config.scratchpad_cmd_storage[argc], sizeof(wm.config.scratchpad_cmd_storage[argc]), "%s", wm.config.scratchpad_class);
+        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
+        argc++;
+
+        wm.config.scratchpad_cmd[argc] = NULL;
+    }
+}
+
+void init_default_keybinds(void) {
+    wm.config.keybind_count = 0;
+}
+
+static bool add_bar_module(BarModule *arr, size_t *count, const char *kind_name, const char *arg, const char *context) {
+    if (!arr || !count || !kind_name) {
+        return false;
+    }
+
+    if (*count >= MAX_BAR_MODULES_PER_SECTION) {
+        fprintf(stderr, "vwm: too many bar modules in %s\n", context ? context : "modules");
+        return false;
+    }
+
+    BarModuleKind kind;
+    if (!parse_bar_module_kind(kind_name, &kind)) {
+        fprintf(stderr, "vwm: unknown bar module '%s'\n", kind_name);
+        return false;
+    }
+
+    BarModule *mod = &arr[*count];
+    memset(mod, 0, sizeof(*mod));
+    mod->kind = kind;
+
+    if (arg && *arg) {
+        snprintf(mod->arg, sizeof(mod->arg), "%s", arg);
+    }
+
+    (*count)++;
     return true;
 }
 
-static bool parse_dynamic_key_line(char *raw, const char *resolved_path) {
-    char storage[CMD_MAX_ARGS][256] = {{0}};
-    const char *argv[CMD_MAX_ARGS] = {0};
+static bool parse_general_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
 
-    char *rest = raw + strlen("key");
-    rest = trim_whitespace(rest);
-
-    size_t argc = split_command_argv(rest, storage, argv, CMD_MAX_ARGS);
     if (argc < 2) {
-        fprintf(stderr, "vwm: invalid key line in %s\n", resolved_path);
+        return false;
+    }
+
+    if (strcmp(argv[0], "font_family") == 0) {
+        snprintf(wm.config.font_family, sizeof(wm.config.font_family), "%s", argv[1]);
         return true;
     }
 
-    const char *combo = argv[0];
-    const char *verb = argv[1];
+    if (strcmp(argv[0], "font_size") == 0) {
+        wm.config.font_size = strtof(argv[1], NULL);
+        return true;
+    }
 
-    if (strcmp(verb, "spawn") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "vwm: key spawn missing command name in %s\n", resolved_path);
-            return true;
+    if (strcmp(argv[0], "terminal") == 0) {
+        snprintf(wm.config.terminal, sizeof(wm.config.terminal), "%s", argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "launcher") == 0) {
+        snprintf(wm.config.launcher, sizeof(wm.config.launcher), "%s", argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "border_width") == 0) {
+        wm.config.border_width = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "gap_px") == 0) {
+        wm.config.gap_px = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "default_mfact") == 0) {
+        wm.config.default_mfact = strtof(argv[1], NULL);
+        return true;
+    }
+
+    if (strcmp(argv[0], "sync_workspaces") == 0) {
+        bool b = false;
+        if (parse_bool_value(argv[1], &b)) {
+            wm.config.sync_workspaces = b;
         }
-        add_dynamic_keybind_command(combo, argv[2]);
         return true;
     }
 
-    if (strcmp(verb, "scratchpad") == 0) {
-        if (argc >= 3) {
-            add_dynamic_keybind_scratchpad(combo, argv[2]);
+    fprintf(stderr, "vwm: unknown general key '%s'\n", argv[0]);
+    return true;
+}
+
+static bool parse_colors_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 2) {
+        return false;
+    }
+
+    uint32_t c = 0;
+    if (!parse_color_value(argv[1], &c)) {
+        fprintf(stderr, "vwm: invalid color value '%s'\n", argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "bar_bg") == 0) { wm.config.bar_bg = c; return true; }
+    if (strcmp(argv[0], "bar_fg") == 0) { wm.config.bar_fg = c; return true; }
+    if (strcmp(argv[0], "border_active") == 0) { wm.config.border_active = c; return true; }
+    if (strcmp(argv[0], "border_inactive") == 0) { wm.config.border_inactive = c; return true; }
+    if (strcmp(argv[0], "workspace_current") == 0) { wm.config.workspace_current = c; return true; }
+    if (strcmp(argv[0], "workspace_occupied") == 0) { wm.config.workspace_occupied = c; return true; }
+    if (strcmp(argv[0], "workspace_empty") == 0) { wm.config.workspace_empty = c; return true; }
+
+    fprintf(stderr, "vwm: unknown colors key '%s'\n", argv[0]);
+    return true;
+}
+
+static bool parse_bar_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 2) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "height") == 0) {
+        wm.config.bar_height = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "style") == 0) {
+        BarStyleMode mode;
+        if (parse_bar_style_value(argv[1], &mode)) {
+            dynconfig.bar_theme.mode = mode;
         } else {
-            add_dynamic_keybind_builtin(combo, ACTION_TOGGLE_SCRATCHPAD);
+            fprintf(stderr, "vwm: invalid bar style '%s'\n", argv[1]);
         }
+        return true;
+    }
+
+    if (strcmp(argv[0], "presentation") == 0 || strcmp(argv[0], "mode") == 0) {
+        BarPresentationMode mode;
+        if (parse_bar_presentation_value(argv[1], &mode)) {
+            dynconfig.bar_theme.presentation_mode = mode;
+        } else {
+            fprintf(stderr, "vwm: invalid bar presentation '%s'\n", argv[1]);
+        }
+        return true;
+    }
+
+    if (strcmp(argv[0], "float_margin_x") == 0) {
+        dynconfig.bar_theme.floating_margin_x = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "float_margin_y") == 0) {
+        dynconfig.bar_theme.floating_margin_y = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "transparent_background") == 0) {
+        bool b = false;
+        if (parse_bool_value(argv[1], &b)) {
+            dynconfig.bar_theme.transparent_background = b;
+        }
+        return true;
+    }
+
+    if (strcmp(argv[0], "module_gap") == 0) {
+        dynconfig.bar_theme.module_gap = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "module_padding_x") == 0) {
+        dynconfig.bar_theme.module_padding_x = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "module_padding_y") == 0) {
+        dynconfig.bar_theme.module_padding_y = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "module_radius") == 0) {
+        dynconfig.bar_theme.module_radius = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "module_border_width") == 0) {
+        dynconfig.bar_theme.module_border_width = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "volume_show_bar") == 0) {
+        bool b = false;
+        if (parse_bool_value(argv[1], &b)) {
+            dynconfig.bar_theme.volume_bar_enabled = b;
+        }
+        return true;
+    }
+
+    if (strcmp(argv[0], "volume_bar_width") == 0) {
+        dynconfig.bar_theme.volume_bar_width = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "volume_bar_height") == 0) {
+        dynconfig.bar_theme.volume_bar_height = atoi(argv[1]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "volume_bar_radius") == 0) {
+        dynconfig.bar_theme.volume_bar_radius = atoi(argv[1]);
+        return true;
+    }
+
+    {
+        uint32_t c = 0;
+        if (parse_color_value(argv[1], &c)) {
+            if (strcmp(argv[0], "module_bg") == 0) { dynconfig.bar_theme.module_bg = c; return true; }
+            if (strcmp(argv[0], "module_fg") == 0) { dynconfig.bar_theme.module_fg = c; return true; }
+            if (strcmp(argv[0], "module_border") == 0) { dynconfig.bar_theme.module_border = c; return true; }
+
+            if (strcmp(argv[0], "volume_bar_bg") == 0) { dynconfig.bar_theme.volume_bar_bg = c; return true; }
+            if (strcmp(argv[0], "volume_low") == 0) { dynconfig.bar_theme.volume_bar_fg_low = c; return true; }
+            if (strcmp(argv[0], "volume_mid") == 0) { dynconfig.bar_theme.volume_bar_fg_mid = c; return true; }
+            if (strcmp(argv[0], "volume_high") == 0) { dynconfig.bar_theme.volume_bar_fg_high = c; return true; }
+            if (strcmp(argv[0], "volume_muted") == 0) { dynconfig.bar_theme.volume_bar_fg_muted = c; return true; }
+
+            if (strcmp(argv[0], "accent_monitor") == 0) { dynconfig.bar_theme.accent_monitor = c; return true; }
+            if (strcmp(argv[0], "accent_sync_enabled") == 0) { dynconfig.bar_theme.accent_sync_enabled = c; return true; }
+            if (strcmp(argv[0], "accent_sync_disabled") == 0) { dynconfig.bar_theme.accent_sync_disabled = c; return true; }
+
+            if (strcmp(argv[0], "accent_network_up") == 0) { dynconfig.bar_theme.accent_network_up = c; return true; }
+            if (strcmp(argv[0], "accent_network_down") == 0) { dynconfig.bar_theme.accent_network_down = c; return true; }
+
+            if (strcmp(argv[0], "accent_battery_full") == 0) { dynconfig.bar_theme.accent_battery_full = c; return true; }
+            if (strcmp(argv[0], "accent_battery_charging") == 0) { dynconfig.bar_theme.accent_battery_charging = c; return true; }
+            if (strcmp(argv[0], "accent_battery_normal") == 0) { dynconfig.bar_theme.accent_battery_normal = c; return true; }
+            if (strcmp(argv[0], "accent_battery_low") == 0) { dynconfig.bar_theme.accent_battery_low = c; return true; }
+            if (strcmp(argv[0], "accent_battery_critical") == 0) { dynconfig.bar_theme.accent_battery_critical = c; return true; }
+
+            if (strcmp(argv[0], "accent_clock") == 0) { dynconfig.bar_theme.accent_clock = c; return true; }
+        }
+    }
+
+    fprintf(stderr, "vwm: unknown bar key '%s'\n", argv[0]);
+    return true;
+}
+
+static bool parse_rules_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 3) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "float") == 0 && strcmp(argv[1], "class") == 0 && argc >= 3) {
+        add_float_rule(argv[2]);
+        return true;
+    }
+
+    if (strcmp(argv[0], "workspace") == 0 && argc >= 4 && strcmp(argv[2], "class") == 0) {
+        int workspace = atoi(argv[1]);
+        if (workspace >= 1 && workspace <= WORKSPACE_COUNT) {
+            add_workspace_rule(workspace - 1, argv[3]);
+        }
+        return true;
+    }
+
+    fprintf(stderr, "vwm: invalid rules directive\n");
+    return true;
+}
+
+static bool parse_commands_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 3) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "command") == 0) {
+        add_dynamic_command(argv[1], argv[2]);
+        return true;
+    }
+
+    fprintf(stderr, "vwm: invalid commands directive\n");
+    return true;
+}
+
+static bool parse_scratchpads_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 4) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "scratchpad") != 0) {
+        fprintf(stderr, "vwm: invalid scratchpads directive\n");
+        return true;
+    }
+
+    if (strcmp(argv[2], "command") == 0) {
+        add_dynamic_scratchpad(argv[1], argv[3]);
+        return true;
+    }
+
+    if (strcmp(argv[2], "class") == 0) {
+        set_dynamic_scratchpad_class(argv[1], argv[3]);
+        return true;
+    }
+
+    fprintf(stderr, "vwm: invalid scratchpad property '%s'\n", argv[2]);
+    return true;
+}
+
+static bool parse_binds_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 3) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "bind") != 0) {
+        fprintf(stderr, "vwm: invalid binds directive\n");
+        return true;
+    }
+
+    const char *combo = argv[1];
+    const char *verb = argv[2];
+
+    if (strcmp(verb, "spawn") == 0 && argc >= 4) {
+        add_dynamic_keybind_command(combo, argv[3]);
+        return true;
+    }
+
+    if (strcmp(verb, "scratchpad") == 0 && argc >= 4) {
+        add_dynamic_keybind_scratchpad(combo, argv[3]);
         return true;
     }
 
@@ -924,70 +1232,56 @@ static bool parse_dynamic_key_line(char *raw, const char *resolved_path) {
         return true;
     }
 
-    fprintf(stderr, "vwm: unknown key action '%s' in %s\n", verb, resolved_path);
+    fprintf(stderr, "vwm: unknown bind action '%s'\n", verb);
     return true;
 }
 
-static bool parse_bar_module_line(char *raw, const char *resolved_path) {
-    char storage[CMD_MAX_ARGS][256] = {{0}};
-    const char *argv[CMD_MAX_ARGS] = {0};
+static bool parse_modules_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
 
-    size_t argc = split_command_argv(raw, storage, argv, CMD_MAX_ARGS);
     if (argc < 2) {
-        fprintf(stderr, "vwm: invalid bar module line in %s\n", resolved_path);
-        return true;
-    }
-
-    BarModule *arr = NULL;
-    size_t *count = NULL;
-
-    if (strcmp(argv[0], "bar_left") == 0) {
-        arr = dynconfig.bar_left;
-        count = &dynconfig.bar_left_count;
-    } else if (strcmp(argv[0], "bar_center") == 0) {
-        arr = dynconfig.bar_center;
-        count = &dynconfig.bar_center_count;
-    } else if (strcmp(argv[0], "bar_right") == 0) {
-        arr = dynconfig.bar_right;
-        count = &dynconfig.bar_right_count;
-    } else {
         return false;
     }
 
-    const char *kind_name = argv[1];
+    const char *section = argv[0];
+    const char *kind = argv[1];
     const char *arg = (argc >= 3) ? argv[2] : "";
 
-    add_bar_module(arr, count, kind_name, arg, resolved_path);
+    if (strcmp(section, "left") == 0) {
+        add_bar_module(dynconfig.bar_left, &dynconfig.bar_left_count, kind, arg, "modules.left");
+        return true;
+    }
+
+    if (strcmp(section, "center") == 0) {
+        add_bar_module(dynconfig.bar_center, &dynconfig.bar_center_count, kind, arg, "modules.center");
+        return true;
+    }
+
+    if (strcmp(section, "right") == 0) {
+        add_bar_module(dynconfig.bar_right, &dynconfig.bar_right_count, kind, arg, "modules.right");
+        return true;
+    }
+
+    fprintf(stderr, "vwm: invalid modules section '%s'\n", section);
     return true;
 }
 
-static bool parse_workspace_rule_line(char *raw, const char *resolved_path) {
-    char storage[CMD_MAX_ARGS][256] = {{0}};
-    const char *argv[CMD_MAX_ARGS] = {0};
-
-    size_t argc = split_command_argv(raw, storage, argv, CMD_MAX_ARGS);
-    if (argc < 4) {
-        fprintf(stderr, "vwm: invalid workspace_rule line in %s\n", resolved_path);
-        return true;
-    }
-
-    if (strcmp(argv[0], "workspace_rule") != 0) {
+static bool is_block_name(const char *name) {
+    if (!name) {
         return false;
     }
 
-    int workspace = atoi(argv[1]);
-    if (workspace < 1 || workspace > WORKSPACE_COUNT) {
-        fprintf(stderr, "vwm: workspace_rule target must be 1-%d in %s\n", WORKSPACE_COUNT, resolved_path);
-        return true;
-    }
-
-    if (strcmp(argv[2], "class") != 0) {
-        fprintf(stderr, "vwm: workspace_rule currently only supports 'class' in %s\n", resolved_path);
-        return true;
-    }
-
-    add_workspace_rule(workspace - 1, argv[3]);
-    return true;
+    return
+        strcmp(name, "general") == 0 ||
+        strcmp(name, "colors") == 0 ||
+        strcmp(name, "bar") == 0 ||
+        strcmp(name, "rules") == 0 ||
+        strcmp(name, "commands") == 0 ||
+        strcmp(name, "scratchpads") == 0 ||
+        strcmp(name, "binds") == 0 ||
+        strcmp(name, "modules") == 0;
 }
 
 void load_config_file_recursive(const char *path, int depth) {
@@ -1010,6 +1304,7 @@ void load_config_file_recursive(const char *path, int depth) {
     }
 
     char line[1024];
+    ConfigBlock block = CFG_BLOCK_NONE;
 
     while (fgets(line, sizeof(line), fp)) {
         strip_comment(line);
@@ -1019,397 +1314,126 @@ void load_config_file_recursive(const char *path, int depth) {
             continue;
         }
 
-        if (strncmp(raw, "command", 7) == 0 && isspace((unsigned char)raw[7])) {
-            parse_dynamic_command_line(raw, resolved_path);
+        if (strcmp(raw, "}") == 0) {
+            block = CFG_BLOCK_NONE;
             continue;
         }
 
-        if (strncmp(raw, "key", 3) == 0 && isspace((unsigned char)raw[3])) {
-            parse_dynamic_key_line(raw, resolved_path);
-            continue;
-        }
+        if (block == CFG_BLOCK_NONE) {
+            char storage[16][256] = {{0}};
+            const char *argv[16] = {0};
+            size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
 
-        if (strncmp(raw, "scratchpad", 10) == 0 && isspace((unsigned char)raw[10])) {
-            if (parse_dynamic_scratchpad_line(raw, resolved_path)) {
-                continue;
-            }
-        }
+            if (argc >= 2 && strcmp(argv[0], "include") == 0) {
+                char include_path[CONFIG_PATH_MAX];
+                resolve_include_path(resolved_path, argv[1], include_path, sizeof(include_path));
 
-        if ((strncmp(raw, "bar_left", 8) == 0 && isspace((unsigned char)raw[8])) ||
-            (strncmp(raw, "bar_center", 10) == 0 && isspace((unsigned char)raw[10])) ||
-            (strncmp(raw, "bar_right", 9) == 0 && isspace((unsigned char)raw[9]))) {
-            parse_bar_module_line(raw, resolved_path);
-            continue;
-        }
-
-        if (strncmp(raw, "workspace_rule", 14) == 0 && isspace((unsigned char)raw[14])) {
-            parse_workspace_rule_line(raw, resolved_path);
-            continue;
-        }
-
-        char *key = NULL;
-        char *val = NULL;
-        if (!split_config_kv(raw, &key, &val)) {
-            continue;
-        }
-
-        if (strcmp(key, "include") == 0) {
-            config_unquote_inplace(val);
-
-            char include_path[CONFIG_PATH_MAX];
-            resolve_include_path(resolved_path, val, include_path, sizeof(include_path));
-
-            if (strcmp(include_path, resolved_path) == 0) {
-                fprintf(stderr, "vwm: skipping self-include: %s\n", include_path);
-                continue;
-            }
-
-            load_config_file_recursive(include_path, depth + 1);
-            continue;
-        }
-
-        if (strcmp(key, "float") == 0) {
-            char *subkey = val;
-            while (*subkey && !isspace((unsigned char)*subkey)) {
-                subkey++;
-            }
-
-            if (*subkey != '\0') {
-                *subkey = '\0';
-                subkey++;
-                subkey = trim_whitespace(subkey);
-
-                if (strcmp(val, "class") == 0) {
-                    config_unquote_inplace(subkey);
-                    add_float_rule(subkey);
+                if (strcmp(include_path, resolved_path) == 0) {
+                    fprintf(stderr, "vwm: skipping self-include: %s\n", include_path);
                     continue;
                 }
+
+                load_config_file_recursive(include_path, depth + 1);
+                continue;
+            }
+        }
+
+        size_t len = strlen(raw);
+        if (len >= 1 && raw[len - 1] == '{') {
+            raw[len - 1] = '\0';
+            char *name = trim_whitespace(raw);
+
+            if (block != CFG_BLOCK_NONE) {
+                fprintf(stderr, "vwm: nested blocks are not allowed in %s\n", resolved_path);
+                continue;
             }
 
-            fprintf(stderr, "vwm: invalid float rule in %s\n", resolved_path);
-            continue;
-        }
-
-        if (strcmp(key, "bar_style") == 0) {
-            BarStyleMode mode;
-            if (parse_bar_style_value(val, &mode)) {
-                dynconfig.bar_theme.mode = mode;
-            } else {
-                fprintf(stderr, "vwm: invalid bar_style '%s' in %s\n", val, resolved_path);
+            if (!is_block_name(name)) {
+                fprintf(stderr, "vwm: unknown block '%s' in %s\n", name, resolved_path);
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "bar_transparent_background") == 0) {
-            bool b = false;
-            if (parse_bool_value(val, &b)) {
-                dynconfig.bar_theme.transparent_background = b;
+            if (strcmp(name, "general") == 0) {
+                block = CFG_BLOCK_GENERAL;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "bar_float_margin_x") == 0) {
-            dynconfig.bar_theme.floating_margin_x = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "bar_float_margin_y") == 0) {
-            dynconfig.bar_theme.floating_margin_y = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_gap") == 0) {
-            dynconfig.bar_theme.module_gap = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_padding_x") == 0) {
-            dynconfig.bar_theme.module_padding_x = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_padding_y") == 0) {
-            dynconfig.bar_theme.module_padding_y = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_radius") == 0) {
-            dynconfig.bar_theme.module_radius = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_bg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.module_bg = c;
+            if (strcmp(name, "colors") == 0) {
+                block = CFG_BLOCK_COLORS;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "terminal") == 0) {
-            config_unquote_inplace(val);
-            snprintf(wm.config.terminal, sizeof(wm.config.terminal), "%s", val);
-            continue;
-        }
-
-        if (strcmp(key, "launcher") == 0) {
-            config_unquote_inplace(val);
-            snprintf(wm.config.launcher, sizeof(wm.config.launcher), "%s", val);
-            continue;
-        }
-
-        if (strcmp(key, "scratchpad") == 0) {
-            config_unquote_inplace(val);
-            snprintf(wm.config.scratchpad, sizeof(wm.config.scratchpad), "%s", val);
-            continue;
-        }
-
-        if (strcmp(key, "scratchpad_class") == 0) {
-            config_unquote_inplace(val);
-            snprintf(wm.config.scratchpad_class, sizeof(wm.config.scratchpad_class), "%s", val);
-            continue;
-        }
-
-        if (strcmp(key, "font") == 0 || strcmp(key, "font_family") == 0) {
-            config_unquote_inplace(val);
-            snprintf(wm.config.font_family, sizeof(wm.config.font_family), "%s", val);
-            continue;
-        }
-
-        if (strcmp(key, "gap_px") == 0) {
-            wm.config.gap_px = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "bar_height") == 0) {
-            wm.config.bar_height = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "border_width") == 0) {
-            wm.config.border_width = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "default_mfact") == 0) {
-            wm.config.default_mfact = strtof(val, NULL);
-            continue;
-        }
-
-        if (strcmp(key, "sync_workspaces") == 0) {
-            bool b = false;
-            if (parse_bool_value(val, &b)) {
-                wm.config.sync_workspaces = b;
+            if (strcmp(name, "bar") == 0) {
+                block = CFG_BLOCK_BAR;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "bar_bg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.bar_bg = c;
+            if (strcmp(name, "rules") == 0) {
+                block = CFG_BLOCK_RULES;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "bar_fg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.bar_fg = c;
+            if (strcmp(name, "commands") == 0) {
+                block = CFG_BLOCK_COMMANDS;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "border_active") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.border_active = c;
+            if (strcmp(name, "scratchpads") == 0) {
+                block = CFG_BLOCK_SCRATCHPADS;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "border_inactive") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.border_inactive = c;
+            if (strcmp(name, "binds") == 0) {
+                block = CFG_BLOCK_BINDS;
+                continue;
             }
-            continue;
-        }
 
-        if (strcmp(key, "font_size") == 0) {
-            wm.config.font_size = strtof(val, NULL);
-            continue;
-        }
-
-        if (strcmp(key, "bar_outer_gap") == 0) {
-            wm.config.bar_outer_gap = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_enabled") == 0) {
-            bool b = false;
-            if (parse_bool_value(val, &b)) {
-                dynconfig.bar_theme.volume_bar_enabled = b;
+            if (strcmp(name, "modules") == 0) {
+                clear_bar_modules();
+                block = CFG_BLOCK_MODULES;
+                continue;
             }
+
             continue;
         }
 
-        if (strcmp(key, "volume_bar_width") == 0) {
-            dynconfig.bar_theme.volume_bar_width = atoi(val);
+        if (block == CFG_BLOCK_NONE) {
+            fprintf(stderr, "vwm: directive outside block in %s: %s\n", resolved_path, raw);
             continue;
         }
 
-        if (strcmp(key, "volume_bar_height") == 0) {
-            dynconfig.bar_theme.volume_bar_height = atoi(val);
-            continue;
+        switch (block) {
+            case CFG_BLOCK_GENERAL:
+                parse_general_line(raw);
+                break;
+            case CFG_BLOCK_COLORS:
+                parse_colors_line(raw);
+                break;
+            case CFG_BLOCK_BAR:
+                parse_bar_line(raw);
+                break;
+            case CFG_BLOCK_RULES:
+                parse_rules_line(raw);
+                break;
+            case CFG_BLOCK_COMMANDS:
+                parse_commands_line(raw);
+                break;
+            case CFG_BLOCK_SCRATCHPADS:
+                parse_scratchpads_line(raw);
+                break;
+            case CFG_BLOCK_BINDS:
+                parse_binds_line(raw);
+                break;
+            case CFG_BLOCK_MODULES:
+                parse_modules_line(raw);
+                break;
+            default:
+                break;
         }
-
-        if (strcmp(key, "volume_bar_radius") == 0) {
-            dynconfig.bar_theme.volume_bar_radius = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_bg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.volume_bar_bg = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_fg_low") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.volume_bar_fg_low = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_fg_mid") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.volume_bar_fg_mid = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_fg_high") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.volume_bar_fg_high = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "volume_bar_fg_muted") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.volume_bar_fg_muted = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "workspace_current") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.workspace_current = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "workspace_occupied") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.workspace_occupied = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "workspace_empty") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                wm.config.workspace_empty = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "bar_style") == 0) {
-            config_unquote_inplace(val);
-
-            if (strcmp(val, "flat") == 0) {
-                dynconfig.bar_theme.mode = BAR_STYLE_FLAT;
-            } else if (strcmp(val, "floating") == 0) {
-                dynconfig.bar_theme.mode = BAR_STYLE_FLOATING;
-            } else {
-                fprintf(stderr, "vwm: invalid bar_style '%s' in %s\n", val, resolved_path);
-            }
-            continue;
-        }
-
-        if (strcmp(key, "module_padding_x") == 0) {
-            dynconfig.bar_theme.module_padding_x = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_padding_y") == 0) {
-            dynconfig.bar_theme.module_padding_y = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_gap") == 0) {
-            dynconfig.bar_theme.module_gap = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_radius") == 0) {
-            dynconfig.bar_theme.module_radius = atoi(val);
-            continue;
-        }
-
-        if (strcmp(key, "module_bg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.module_bg = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "module_fg") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.module_fg = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "module_border") == 0) {
-            uint32_t c = 0;
-            if (parse_color_value(val, &c)) {
-                dynconfig.bar_theme.module_border = c;
-            }
-            continue;
-        }
-
-        if (strcmp(key, "module_border_width") == 0) {
-            dynconfig.bar_theme.module_border_width = atoi(val);
-            continue;
-        }
-
-        fprintf(stderr, "vwm: unknown config key '%s' in %s\n", key, resolved_path);
     }
 
     fclose(fp);
     rebuild_config_commands();
-}
-
-static void clear_bar_modules(void) {
-    dynconfig.bar_left_count = 0;
-    dynconfig.bar_center_count = 0;
-    dynconfig.bar_right_count = 0;
-
-    memset(dynconfig.bar_left, 0, sizeof(dynconfig.bar_left));
-    memset(dynconfig.bar_center, 0, sizeof(dynconfig.bar_center));
-    memset(dynconfig.bar_right, 0, sizeof(dynconfig.bar_right));
 }
 
 void load_config_file(const char *path) {
@@ -1419,6 +1443,7 @@ void load_config_file(const char *path) {
 void load_default_config(void) {
     memset(&wm.config, 0, sizeof(wm.config));
     memset(&dynconfig, 0, sizeof(dynconfig));
+
     clear_bar_modules();
     init_default_bar_theme();
 
@@ -1445,15 +1470,6 @@ void load_default_config(void) {
     wm.config.workspace_occupied = 0x8c8c8c;
     wm.config.workspace_empty = 0x4a4a4a;
 
-    dynconfig.bar_theme.mode = BAR_STYLE_FLAT;
-    dynconfig.bar_theme.floating_margin_x = 24;
-    dynconfig.bar_theme.floating_margin_y = 8;
-    dynconfig.bar_theme.module_gap = 8;
-    dynconfig.bar_theme.module_padding_x = 10;
-    dynconfig.bar_theme.module_padding_y = 4;
-    dynconfig.bar_theme.module_radius = 10;
-    dynconfig.bar_theme.module_bg = 0x1b1b1b;
-
     snprintf(wm.config.font_family, sizeof(wm.config.font_family), "monospace");
     snprintf(wm.config.terminal, sizeof(wm.config.terminal), "kitty");
     snprintf(wm.config.launcher, sizeof(wm.config.launcher), "rofi -show drun");
@@ -1470,43 +1486,13 @@ void apply_config(void) {
     sanitize_config();
 
     for (Monitor *m = wm.mons; m; m = m->next) {
-        int outer = MAX(0, wm.config.bar_outer_gap);
-        int extra_x = 0;
-        int extra_y = 0;
-
-        if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
-            extra_x = MAX(0, dynconfig.bar_theme.floating_margin_x);
-            extra_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
-        }
-
-        uint32_t vals[] = {
-            (uint32_t)(m->geom.x + outer + extra_x),
-            (uint32_t)(m->geom.y + outer + extra_y),
-            (uint32_t)MAX(1, m->geom.w - ((outer + extra_x) * 2)),
-            (uint32_t)wm.config.bar_height
-        };
-
-        xcb_change_window_attributes(
-            wm.conn,
-            m->barwin,
-            XCB_CW_BACK_PIXEL,
-            &wm.config.bar_bg
-        );
-
-        xcb_configure_window(
-            wm.conn,
-            m->barwin,
-            XCB_CONFIG_WINDOW_X |
-            XCB_CONFIG_WINDOW_Y |
-            XCB_CONFIG_WINDOW_WIDTH |
-            XCB_CONFIG_WINDOW_HEIGHT,
-            vals
-        );
+        create_bar(m);
 
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             Workspace *ws = &m->workspaces[i];
             ws->gap_px = wm.config.gap_px;
             ws->mfact = CLAMP(ws->mfact, 0.05f, 0.95f);
+
             if (ws->mfact <= 0.0f || ws->mfact >= 1.0f) {
                 ws->mfact = wm.config.default_mfact;
             }
@@ -1518,6 +1504,7 @@ void apply_config(void) {
 
     grab_keys();
     draw_all_bars();
+    xcb_flush(wm.conn);
 }
 
 void reload_config(const void *arg) {

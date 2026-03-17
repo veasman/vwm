@@ -33,8 +33,19 @@ int main(void) {
     }
 
     wm.xscreen = DefaultScreen(wm.dpy);
-    wm.visual = DefaultVisual(wm.dpy, wm.xscreen);
-    wm.colormap = DefaultColormap(wm.dpy, wm.xscreen);
+    wm.shape_supported = false;
+    wm.shape_event_base = 0;
+    wm.shape_error_base = 0;
+
+    wm.scratchpad_spawn_pending = false;
+    wm.pending_scratchpad_name[0] = '\0';
+    wm.pending_scratchpad_class[0] = '\0';
+    wm.scratchpad = NULL;
+
+    wm.xft_font = NULL;
+    wm.status_cache[0] = '\0';
+
+    setup_visuals();
 
     wm.conn = XGetXCBConnection(wm.dpy);
     if (!wm.conn || xcb_connection_has_error(wm.conn)) {
@@ -43,10 +54,7 @@ int main(void) {
 
     XSetEventQueueOwner(wm.dpy, XCBOwnsEventQueue);
 
-    wm.scratchpad_spawn_pending = false;
-    wm.scratchpad = NULL;
-    wm.xft_font = NULL;
-    wm.status_cache[0] = '\0';
+    setup_shape_extension();
 
     load_default_config();
     setup_atoms();
@@ -58,7 +66,10 @@ int main(void) {
     draw_all_bars();
     xcb_flush(wm.conn);
 
-    fprintf(stderr, "vwm: started\n");
+    fprintf(stderr, "vwm: started (%s visual, depth %d)\n",
+            wm.has_argb_visual ? "ARGB" : "default",
+            wm.depth);
+
     event_loop();
     cleanup();
     return 0;

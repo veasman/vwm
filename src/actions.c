@@ -76,6 +76,32 @@ static Client *find_client_by_class_name(const char *class_name) {
     return NULL;
 }
 
+static void set_pending_scratchpad_request(const char *name, const char *class_name) {
+    wm.scratchpad_spawn_pending = true;
+
+    if (name && *name) {
+        snprintf(
+            wm.pending_scratchpad_name,
+            sizeof(wm.pending_scratchpad_name),
+            "%s",
+            name
+        );
+    } else {
+        wm.pending_scratchpad_name[0] = '\0';
+    }
+
+    if (class_name && *class_name) {
+        snprintf(
+            wm.pending_scratchpad_class,
+            sizeof(wm.pending_scratchpad_class),
+            "%s",
+            class_name
+        );
+    } else {
+        wm.pending_scratchpad_class[0] = '\0';
+    }
+}
+
 static void raise_client_above(Client *c) {
     if (!c) {
         return;
@@ -358,7 +384,7 @@ void toggle_scratchpad(const void *arg) {
     }
 
     if (!wm.scratchpad) {
-        wm.scratchpad_spawn_pending = true;
+        set_pending_scratchpad_request("legacy", wm.config.scratchpad_class);
         spawn(wm.config.scratchpad_cmd);
         return;
     }
@@ -410,13 +436,22 @@ void toggle_named_scratchpad(const char *name) {
         return;
     }
 
+    if (wm.scratchpad_spawn_pending) {
+        return;
+    }
+
     Client *c = NULL;
     if (sp->class_name[0] != '\0') {
         c = find_client_by_class_name(sp->class_name);
     }
 
     if (!c) {
-        wm.scratchpad_spawn_pending = true;
+        if (sp->class_name[0] == '\0') {
+            fprintf(stderr, "vwm: scratchpad '%s' has no class, cannot safely track spawn\n", name);
+            return;
+        }
+
+        set_pending_scratchpad_request(name, sp->class_name);
         spawn(sp->argv);
         return;
     }

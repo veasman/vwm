@@ -5,6 +5,22 @@
 #include "config.h"
 #include "x11.h"
 
+uint32_t border_pixel_for_rgb(uint32_t rgb) {
+    uint32_t packed = rgb & 0x00ffffffu;
+
+    /*
+     * Force borders fully opaque.
+     *
+     * With ARGB-capable visuals/compositors, writing only 0xRRGGBB can behave
+     * like 0x00RRGGBB, which makes borders effectively transparent.
+     *
+     * For plain 24-bit windows the upper byte is ignored, so this is safe.
+     */
+    packed |= 0xff000000u;
+
+    return packed;
+}
+
 uint32_t border_width_for_client(Client *c) {
     if (!c || c->is_fullscreen) {
         return 0;
@@ -76,44 +92,61 @@ void update_monitor_workarea(Monitor *m) {
 
     Workspace *ws = ws_of(m, m->current_ws);
     bool hide_bar = ws ? ws->hide_bar : false;
-    int outer = MAX(0, wm.config.bar_outer_gap);
-    int extra_y = 0;
+
+    int bar_margin_y = 0;
 
     if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
-        extra_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
+        bar_margin_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
     }
 
     if (hide_bar) {
-        xcb_unmap_window(wm.conn, m->barwin);
+        if (m->barwin) {
+            XUnmapWindow(wm.dpy, (Window)m->barwin);
+            XSync(wm.dpy, False);
+        }
+
         m->work.x = m->geom.x;
         m->work.y = m->geom.y;
         m->work.w = m->geom.w;
         m->work.h = m->geom.h;
-    } else {
-        xcb_map_window(wm.conn, m->barwin);
-
-        m->work.x = m->geom.x;
-        m->work.y = m->geom.y + outer + extra_y + wm.config.bar_height;
-        m->work.w = m->geom.w;
-        m->work.h = MAX(0, m->geom.h - (outer + extra_y + wm.config.bar_height));
+        return;
     }
+
+    if (m->barwin) {
+        XMapRaised(wm.dpy, (Window)m->barwin);
+        XSync(wm.dpy, False);
+    }
+
+    m->work.x = m->geom.x;
+    m->work.y = m->geom.y + bar_margin_y + wm.config.bar_height;
+    m->work.w = m->geom.w;
+    m->work.h = MAX(0, m->geom.h - (bar_margin_y + wm.config.bar_height));
 }
 
 void clear_focus_borders_except(Client *keep) {
-    uint32_t inactive[] = { wm.config.border_inactive };
+    uint32_t inactive[] = {
+        border_pixel_for_rgb(wm.config.border_inactive)
+    };
 
     for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             Workspace *ws = &m->workspaces[i];
+
             for (Client *c = ws->clients; c; c = c->next) {
-                if (c != keep && !c->is_fullscreen) {
-                    xcb_change_window_attributes(
-                        wm.conn,
-                        c->win,
-                        XCB_CW_BORDER_PIXEL,
-                        inactive
-                    );
+                if (c == keep) {
+                    continue;
                 }
+
+                if (c->is_fullscreen) {
+                    continue;
+                }
+
+                xcb_change_window_attributes(
+                    wm.conn,
+                    c->win,
+                    XCB_CW_BORDER_PIXEL,
+                    inactive
+                );
             }
         }
     }

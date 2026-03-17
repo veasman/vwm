@@ -15,11 +15,17 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <time.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xlib-xcb.h>
 #include <X11/Xft/Xft.h>
+#include <X11/Xutil.h>
+#include <X11/extensions/Xrender.h>
+#include <X11/extensions/shape.h>
 #include <fontconfig/fontconfig.h>
+#include <cairo/cairo.h>
+#include <cairo/cairo-xlib.h>
 
 #include <X11/keysym.h>
 #include <xcb/randr.h>
@@ -177,6 +183,11 @@ struct Monitor {
     xcb_randr_output_t output;
     xcb_window_t barwin;
 
+    int bar_x;
+    int bar_y;
+    int bar_w;
+    int bar_h;
+
     Rect geom;
     Rect work;
 
@@ -198,6 +209,14 @@ typedef struct {
     Visual *visual;
     Colormap colormap;
     int xscreen;
+    int depth;
+    xcb_visualid_t visual_id;
+    bool has_argb_visual;
+    bool owns_colormap;
+
+    bool shape_supported;
+    int shape_event_base;
+    int shape_error_base;
 
     xcb_atom_t wm_protocols;
     xcb_atom_t wm_delete_window;
@@ -206,6 +225,12 @@ typedef struct {
     xcb_atom_t net_active_window;
     xcb_atom_t utf8_string;
     xcb_atom_t net_wm_name;
+    xcb_atom_t net_wm_window_type;
+    xcb_atom_t net_wm_window_type_dock;
+    xcb_atom_t net_wm_state_above;
+    xcb_atom_t net_wm_state_sticky;
+    xcb_atom_t net_wm_state_skip_taskbar;
+    xcb_atom_t net_wm_state_skip_pager;
 
     XftFont *xft_font;
     XftColor xft_bar_fg;
@@ -220,7 +245,10 @@ typedef struct {
     int font_char_width;
 
     bool running;
+
     bool scratchpad_spawn_pending;
+    char pending_scratchpad_name[64];
+    char pending_scratchpad_class[128];
 
     char status_cache[512];
 

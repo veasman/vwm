@@ -5,6 +5,8 @@
 
 xcb_atom_t intern_atom(const char *name);
 void setup_atoms(void);
+void setup_shape_extension(void);
+void setup_visuals(void);
 
 void create_bar(Monitor *m);
 Monitor *add_monitor(int id, int x, int y, int w, int h, xcb_randr_output_t output);

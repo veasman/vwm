@@ -4,6 +4,7 @@
 #include "vwm.h"
 
 uint32_t border_width_for_client(Client *c);
+uint32_t border_pixel_for_rgb(uint32_t rgb);
 void configure_client(Client *c, Rect r);
 void center_client_on_monitor(Client *c, Monitor *m);
 void update_monitor_workarea(Monitor *m);

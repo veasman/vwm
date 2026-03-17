@@ -7,7 +7,7 @@
 #define MAX_WORKSPACE_RULES 64
 #define MAX_DYNAMIC_COMMANDS 64
 #define MAX_DYNAMIC_KEYBINDS 128
-#define MAX_DYNAMIC_SCRATCHPADS 16
+#define MAX_DYNAMIC_SCRATCHPADS 32
 #define MAX_BAR_MODULES_PER_SECTION 16
 
 typedef struct {
@@ -57,6 +57,8 @@ typedef enum {
     BAR_MOD_CLOCK,
     BAR_MOD_CUSTOM,
     BAR_MOD_VOLUME,
+    BAR_MOD_NETWORK,
+    BAR_MOD_BATTERY,
 } BarModuleKind;
 
 typedef struct {
@@ -69,8 +71,14 @@ typedef enum {
     BAR_STYLE_FLOATING,
 } BarStyleMode;
 
+typedef enum {
+    BAR_PRESENTATION_MINIMAL = 0,
+    BAR_PRESENTATION_ACCENT,
+} BarPresentationMode;
+
 typedef struct {
     BarStyleMode mode;
+    BarPresentationMode presentation_mode;
 
     int module_gap;
     int module_padding_x;
@@ -97,6 +105,21 @@ typedef struct {
     uint32_t volume_bar_fg_mid;
     uint32_t volume_bar_fg_high;
     uint32_t volume_bar_fg_muted;
+
+    uint32_t accent_monitor;
+    uint32_t accent_sync_enabled;
+    uint32_t accent_sync_disabled;
+
+    uint32_t accent_network_up;
+    uint32_t accent_network_down;
+
+    uint32_t accent_battery_full;
+    uint32_t accent_battery_charging;
+    uint32_t accent_battery_normal;
+    uint32_t accent_battery_low;
+    uint32_t accent_battery_critical;
+
+    uint32_t accent_clock;
 } BarTheme;
 
 typedef struct {

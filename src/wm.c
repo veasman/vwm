@@ -9,7 +9,7 @@ void cleanup(void) {
     while (m) {
         Monitor *next = m->next;
         if (m->barwin) {
-            xcb_destroy_window(wm.conn, m->barwin);
+            XDestroyWindow(wm.dpy, (Window)m->barwin);
         }
         free(m);
         m = next;
@@ -73,11 +73,11 @@ void event_loop(void) {
                     break;
             }
 
-            xcb_flush(wm.conn);
             free(ev);
         }
 
         bar_tick();
+        xcb_flush(wm.conn);
 
         struct pollfd pfd = {
             .fd = fd,

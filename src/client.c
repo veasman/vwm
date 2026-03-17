@@ -12,6 +12,57 @@ Workspace *ws_of(Monitor *m, int idx) {
     return &m->workspaces[idx];
 }
 
+static bool ascii_case_equal(const char *a, const char *b) {
+    if (!a || !b) {
+        return false;
+    }
+
+    while (*a && *b) {
+        unsigned char ca = (unsigned char)*a;
+        unsigned char cb = (unsigned char)*b;
+
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+
+        if (ca != cb) {
+            return false;
+        }
+
+        a++;
+        b++;
+    }
+
+    return *a == '\0' && *b == '\0';
+}
+
+static bool pending_scratchpad_matches_class_reply(
+    const xcb_icccm_get_wm_class_reply_t *class_reply
+) {
+    if (!wm.scratchpad_spawn_pending) {
+        return false;
+    }
+
+    if (!class_reply) {
+        return false;
+    }
+
+    if (wm.pending_scratchpad_class[0] == '\0') {
+        return false;
+    }
+
+    if (class_reply->instance_name &&
+        ascii_case_equal(class_reply->instance_name, wm.pending_scratchpad_class)) {
+        return true;
+    }
+
+    if (class_reply->class_name &&
+        ascii_case_equal(class_reply->class_name, wm.pending_scratchpad_class)) {
+        return true;
+    }
+
+    return false;
+}
+
 Client *first_tiled_client(Workspace *ws) {
     for (Client *c = ws ? ws->clients : NULL; c; c = c->next) {
         if (!c->is_hidden && !c->is_floating && !c->is_fullscreen) {
@@ -142,21 +193,33 @@ void focus_client(Client *c) {
         return;
     }
 
-    uint32_t inactive[] = { wm.config.border_inactive };
-    uint32_t active[] = { wm.config.border_active };
-    uint32_t stack_above[] = { XCB_STACK_MODE_ABOVE };
+    uint32_t inactive[] = {
+        border_pixel_for_rgb(wm.config.border_inactive)
+    };
+    uint32_t active[] = {
+        border_pixel_for_rgb(wm.config.border_active)
+    };
+    uint32_t stack_above[] = {
+        XCB_STACK_MODE_ABOVE
+    };
 
     for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *it = m->workspaces[i].clients; it; it = it->next) {
-                if (it != c && !it->is_fullscreen) {
-                    xcb_change_window_attributes(
-                        wm.conn,
-                        it->win,
-                        XCB_CW_BORDER_PIXEL,
-                        inactive
-                    );
+                if (it == c) {
+                    continue;
                 }
+
+                if (it->is_fullscreen) {
+                    continue;
+                }
+
+                xcb_change_window_attributes(
+                    wm.conn,
+                    it->win,
+                    XCB_CW_BORDER_PIXEL,
+                    inactive
+                );
             }
         }
     }
@@ -166,7 +229,12 @@ void focus_client(Client *c) {
     ws->focused = c;
 
     if (!c->is_fullscreen) {
-        xcb_change_window_attributes(wm.conn, c->win, XCB_CW_BORDER_PIXEL, active);
+        xcb_change_window_attributes(
+            wm.conn,
+            c->win,
+            XCB_CW_BORDER_PIXEL,
+            active
+        );
     }
 
     xcb_configure_window(
@@ -176,7 +244,12 @@ void focus_client(Client *c) {
         stack_above
     );
 
-    xcb_set_input_focus(wm.conn, XCB_INPUT_FOCUS_POINTER_ROOT, c->win, XCB_CURRENT_TIME);
+    xcb_set_input_focus(
+        wm.conn,
+        XCB_INPUT_FOCUS_POINTER_ROOT,
+        c->win,
+        XCB_CURRENT_TIME
+    );
 
     if (wm.net_active_window != XCB_ATOM_NONE) {
         xcb_change_property(
@@ -424,7 +497,13 @@ void unmanage_client(Client *c) {
 
     if (wm.scratchpad == c) {
         wm.scratchpad = NULL;
+    }
+
+    if (wm.scratchpad_spawn_pending &&
+        wm.pending_scratchpad_class[0] != '\0') {
         wm.scratchpad_spawn_pending = false;
+        wm.pending_scratchpad_name[0] = '\0';
+        wm.pending_scratchpad_class[0] = '\0';
     }
 
     free(c);
@@ -476,14 +555,6 @@ void manage_window(xcb_window_t win) {
     c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
     c->old_frame = c->frame;
 
-    if (wm.scratchpad_spawn_pending) {
-        c->is_scratchpad = true;
-        c->is_floating = true;
-        c->is_hidden = false;
-        wm.scratchpad = c;
-        wm.scratchpad_spawn_pending = false;
-    }
-
     xcb_icccm_get_wm_class_reply_t class_reply;
     bool have_class = xcb_icccm_get_wm_class_reply(
         wm.conn,
@@ -491,6 +562,21 @@ void manage_window(xcb_window_t win) {
         &class_reply,
         NULL
     );
+
+    bool matched_pending_scratchpad = false;
+    if (have_class) {
+        matched_pending_scratchpad = pending_scratchpad_matches_class_reply(&class_reply);
+    }
+
+    if (matched_pending_scratchpad) {
+        c->is_scratchpad = true;
+        c->is_floating = true;
+        c->is_hidden = false;
+        wm.scratchpad = c;
+        wm.scratchpad_spawn_pending = false;
+        wm.pending_scratchpad_name[0] = '\0';
+        wm.pending_scratchpad_class[0] = '\0';
+    }
 
     if (have_class) {
         if ((class_reply.instance_name && class_should_float(class_reply.instance_name)) ||
@@ -511,8 +597,10 @@ void manage_window(xcb_window_t win) {
     }
 
     uint32_t values[] = {
-        wm.config.border_inactive,
-        XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE,
+        border_pixel_for_rgb(wm.config.border_inactive),
+        XCB_EVENT_MASK_ENTER_WINDOW |
+        XCB_EVENT_MASK_FOCUS_CHANGE |
+        XCB_EVENT_MASK_PROPERTY_CHANGE,
     };
 
     xcb_change_window_attributes(
