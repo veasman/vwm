@@ -16,7 +16,9 @@ SRC := \
 	src/layout.c \
 	src/client.c \
 	src/actions.c \
-	src/util.c
+	src/util.c \
+	src/system_status.c \
+	src/bar_modules.c
 
 OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
 

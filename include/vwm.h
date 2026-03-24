@@ -97,6 +97,7 @@ typedef struct {
 
 typedef struct {
     char path[CONFIG_PATH_MAX];
+
     int border_width;
     int gap_px;
     int bar_height;
@@ -109,6 +110,7 @@ typedef struct {
     uint32_t bar_fg;
     uint32_t border_active;
     uint32_t border_inactive;
+    uint32_t border_urgent;
     uint32_t workspace_current;
     uint32_t workspace_occupied;
     uint32_t workspace_empty;
@@ -118,6 +120,10 @@ typedef struct {
     char launcher[256];
     char scratchpad[256];
     char scratchpad_class[256];
+
+    int scratchpad_width_pct;
+    int scratchpad_height_pct;
+    int scratchpad_dim_alpha;
 
     char term_cmd_storage[CMD_MAX_ARGS][256];
     char launcher_cmd_storage[CMD_MAX_ARGS][256];
@@ -182,6 +188,7 @@ struct Monitor {
     int id;
     xcb_randr_output_t output;
     xcb_window_t barwin;
+    xcb_window_t scratch_overlay_win;
 
     int bar_x;
     int bar_y;
@@ -195,7 +202,10 @@ struct Monitor {
     int previous_ws;
 
     Workspace workspaces[WORKSPACE_COUNT];
+    Workspace scratch_workspace;
     Client *focused;
+
+    bool scratchpad_overlay_active;
 
     Monitor *next;
 };
@@ -251,6 +261,8 @@ typedef struct {
     char pending_scratchpad_class[128];
 
     char status_cache[512];
+
+    Cursor hidden_cursor;
 
     Config config;
     Client *scratchpad;

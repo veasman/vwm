@@ -3,6 +3,10 @@
 
 #include "vwm.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 void free_xft_resources(void);
 void alloc_xft_color(XftColor *dst, uint32_t rgb);
 void refresh_xft_resources(void);

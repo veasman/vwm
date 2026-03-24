@@ -102,28 +102,192 @@ void setup_atoms(void) {
   wm.net_wm_state_skip_pager = intern_atom("_NET_WM_STATE_SKIP_PAGER");
 }
 
+static void destroy_monitor_window(xcb_window_t *win) {
+    if (!win || *win == XCB_WINDOW_NONE) {
+        return;
+    }
+
+    XDestroyWindow(wm.dpy, (Window)(*win));
+    *win = XCB_WINDOW_NONE;
+}
+
+static Window create_argb_overlay_window(int x, int y, int w, int h, unsigned long bg_pixel) {
+    XSetWindowAttributes attrs;
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.override_redirect = True;
+    attrs.event_mask = 0;
+    attrs.colormap = wm.colormap;
+    attrs.border_pixel = 0;
+    attrs.background_pixel = bg_pixel;
+
+    unsigned long mask =
+        CWOverrideRedirect |
+        CWEventMask |
+        CWColormap |
+        CWBorderPixel |
+        CWBackPixel;
+
+    return XCreateWindow(
+        wm.dpy,
+        RootWindow(wm.dpy, wm.xscreen),
+        x,
+        y,
+        (unsigned int)MAX(1, w),
+        (unsigned int)MAX(1, h),
+        0,
+        wm.depth,
+        InputOutput,
+        wm.visual,
+        mask,
+        &attrs
+    );
+}
+
+void show_scratch_overlay(Monitor *m) {
+    if (!m || !wm.has_argb_visual) {
+        return;
+    }
+
+    int x = m->geom.x;
+    int y = m->geom.y;
+    int w = MAX(1, m->geom.w);
+    int h = MAX(1, m->geom.h);
+
+    unsigned int alpha = (unsigned int)CLAMP(wm.config.scratchpad_dim_alpha, 0, 255);
+    unsigned long bg = (alpha << 24);
+
+    if (m->scratch_overlay_win == XCB_WINDOW_NONE) {
+        Window win = create_argb_overlay_window(x, y, w, h, bg);
+        if (!win) {
+            return;
+        }
+        m->scratch_overlay_win = (xcb_window_t)win;
+    } else {
+        XSetWindowBackground(wm.dpy, (Window)m->scratch_overlay_win, bg);
+        XMoveResizeWindow(wm.dpy, (Window)m->scratch_overlay_win, x, y, (unsigned int)w, (unsigned int)h);
+        XClearWindow(wm.dpy, (Window)m->scratch_overlay_win);
+    }
+
+    XMapRaised(wm.dpy, (Window)m->scratch_overlay_win);
+}
+
+void hide_scratch_overlay(Monitor *m) {
+    if (!m || m->scratch_overlay_win == XCB_WINDOW_NONE) {
+        return;
+    }
+
+    XUnmapWindow(wm.dpy, (Window)m->scratch_overlay_win);
+}
+
+static Pixmap create_shape_mask_pixmap(int w, int h) {
+    return XCreatePixmap(wm.dpy, RootWindow(wm.dpy, wm.xscreen), (unsigned int)MAX(1, w), (unsigned int)MAX(1, h), 1);
+}
+
+static void apply_rectangular_window_shape(Window win, int w, int h) {
+    if (!wm.shape_supported || !win) {
+        return;
+    }
+
+    XRectangle rect = {
+        .x = 0,
+        .y = 0,
+        .width = (unsigned short)MAX(1, w),
+        .height = (unsigned short)MAX(1, h),
+    };
+
+    XShapeCombineRectangles(
+        wm.dpy,
+        win,
+        ShapeBounding,
+        0,
+        0,
+        &rect,
+        1,
+        ShapeSet,
+        YXBanded
+    );
+}
+
+static void apply_rounded_window_shape(Window win, int w, int h, int radius) {
+    if (!wm.shape_supported || !win) {
+        return;
+    }
+
+    w = MAX(1, w);
+    h = MAX(1, h);
+    radius = MAX(0, radius);
+
+    if (radius <= 0) {
+        apply_rectangular_window_shape(win, w, h);
+        return;
+    }
+
+    if (radius * 2 > w) {
+        radius = w / 2;
+    }
+    if (radius * 2 > h) {
+        radius = h / 2;
+    }
+
+    Pixmap mask = create_shape_mask_pixmap(w, h);
+    if (!mask) {
+        return;
+    }
+
+    GC gc = XCreateGC(wm.dpy, mask, 0, NULL);
+    if (!gc) {
+        XFreePixmap(wm.dpy, mask);
+        return;
+    }
+
+    XSetForeground(wm.dpy, gc, 0);
+    XFillRectangle(wm.dpy, mask, gc, 0, 0, (unsigned int)w, (unsigned int)h);
+
+    XSetForeground(wm.dpy, gc, 1);
+
+    XFillRectangle(wm.dpy, mask, gc, radius, 0, (unsigned int)(w - radius * 2), (unsigned int)h);
+    XFillRectangle(wm.dpy, mask, gc, 0, radius, (unsigned int)w, (unsigned int)(h - radius * 2));
+
+    XFillArc(wm.dpy, mask, gc, 0, 0, radius * 2, radius * 2, 90 * 64, 90 * 64);
+    XFillArc(wm.dpy, mask, gc, w - radius * 2, 0, radius * 2, radius * 2, 0, 90 * 64);
+    XFillArc(wm.dpy, mask, gc, 0, h - radius * 2, radius * 2, radius * 2, 180 * 64, 90 * 64);
+    XFillArc(wm.dpy, mask, gc, w - radius * 2, h - radius * 2, radius * 2, radius * 2, 270 * 64, 90 * 64);
+
+    XShapeCombineMask(wm.dpy, win, ShapeBounding, 0, 0, mask, ShapeSet);
+
+    XFreeGC(wm.dpy, gc);
+    XFreePixmap(wm.dpy, mask);
+}
+
 void create_bar(Monitor *m) {
     if (!m) {
         return;
     }
 
-    if (m->barwin != XCB_WINDOW_NONE) {
-        XDestroyWindow(wm.dpy, (Window)m->barwin);
-        m->barwin = XCB_WINDOW_NONE;
+    if (!dynconfig.bar_enabled) {
+        destroy_monitor_window(&m->barwin);
+        m->bar_x = 0;
+        m->bar_y = 0;
+        m->bar_w = 0;
+        m->bar_h = 0;
+        return;
     }
 
-    int margin_x = 0;
-    int margin_y = 0;
+    destroy_monitor_window(&m->barwin);
 
-    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
-        margin_x = MAX(0, dynconfig.bar_theme.floating_margin_x);
-        margin_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
-    }
+    int margin_x = MAX(0, dynconfig.bar_style.margin_x);
+    int margin_y = MAX(0, dynconfig.bar_style.margin_y);
 
     int bar_x = m->geom.x + margin_x;
-    int bar_y = m->geom.y + margin_y;
     int bar_w = MAX(1, m->geom.w - (margin_x * 2));
     int bar_h = MAX(1, wm.config.bar_height);
+    int bar_y = 0;
+
+    if (dynconfig.bar_style.position == BAR_POSITION_BOTTOM) {
+        bar_y = m->geom.y + m->geom.h - bar_h - margin_y;
+    } else {
+        bar_y = m->geom.y + margin_y;
+    }
 
     m->bar_x = bar_x;
     m->bar_y = bar_y;
@@ -133,7 +297,7 @@ void create_bar(Monitor *m) {
     XSetWindowAttributes attrs;
     memset(&attrs, 0, sizeof(attrs));
     attrs.override_redirect = True;
-    attrs.event_mask = ExposureMask;
+    attrs.event_mask = ExposureMask | PointerMotionMask;
     attrs.colormap = wm.colormap;
     attrs.border_pixel = 0;
     attrs.background_pixel = wm.has_argb_visual ? 0x00000000u : wm.config.bar_bg;
@@ -215,7 +379,12 @@ void create_bar(Monitor *m) {
     }
 
     XMapRaised(wm.dpy, win);
-    XSync(wm.dpy, False);
+
+    if (dynconfig.bar_style.background_enabled && dynconfig.bar_style.radius > 0) {
+        apply_rounded_window_shape(win, bar_w, bar_h, dynconfig.bar_style.radius);
+    } else {
+        apply_rectangular_window_shape(win, bar_w, bar_h);
+    }
 
     update_monitor_workarea(m);
 }
@@ -241,6 +410,15 @@ Monitor *add_monitor(int id, int x, int y, int w, int h,
     m->workspaces[i].nmaster = 1;
     m->workspaces[i].hide_bar = false;
   }
+
+  m->scratch_workspace.id = WORKSPACE_COUNT;
+  m->scratch_workspace.layout = LAYOUT_TILE;
+  m->scratch_workspace.gap_px = wm.config.gap_px;
+  m->scratch_workspace.mfact = wm.config.default_mfact;
+  m->scratch_workspace.nmaster = 1;
+  m->scratch_workspace.hide_bar = false;
+  m->scratch_workspace.clients = NULL;
+  m->scratch_workspace.focused = NULL;
 
   create_bar(m);
 
@@ -344,9 +522,13 @@ void setup_monitors(void) {
 void setup_root(void) {
   uint32_t values[] = {
       XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-      XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_ENTER_WINDOW |
-      XCB_EVENT_MASK_LEAVE_WINDOW | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-      XCB_EVENT_MASK_PROPERTY_CHANGE};
+      XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+      XCB_EVENT_MASK_ENTER_WINDOW |
+      XCB_EVENT_MASK_LEAVE_WINDOW |
+      XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+      XCB_EVENT_MASK_PROPERTY_CHANGE |
+      XCB_EVENT_MASK_POINTER_MOTION
+  };
 
   xcb_void_cookie_t ck = xcb_change_window_attributes_checked(
       wm.conn, wm.root, XCB_CW_EVENT_MASK, values);
@@ -479,7 +661,6 @@ void map_request(xcb_generic_event_t *gev) {
     for (Monitor *m = wm.mons; m; m = m->next) {
         if (ev->window == m->barwin) {
             XMapRaised(wm.dpy, (Window)ev->window);
-            XSync(wm.dpy, False);
             return;
         }
     }
@@ -557,58 +738,64 @@ void configure_request(xcb_generic_event_t *gev) {
 
             if (mask != 0) {
                 XConfigureWindow(wm.dpy, (Window)ev->window, mask, &wc);
-                XSync(wm.dpy, False);
+
+                if (dynconfig.bar_style.background_enabled && dynconfig.bar_style.radius > 0) {
+                    apply_rounded_window_shape((Window)ev->window, m->bar_w, m->bar_h, dynconfig.bar_style.radius);
+                } else {
+                    apply_rectangular_window_shape((Window)ev->window, m->bar_w, m->bar_h);
+                }
             }
+
             return;
         }
     }
 
-  Client *c = find_client(ev->window);
+    Client *c = find_client(ev->window);
 
-  if (!c || c->is_floating) {
-    uint32_t values[7];
-    int i = 0;
-    uint16_t mask = 0;
+    if (!c || c->is_floating) {
+        uint32_t values[7];
+        int i = 0;
+        uint16_t mask = 0;
 
-    if (ev->value_mask & XCB_CONFIG_WINDOW_X) {
-      mask |= XCB_CONFIG_WINDOW_X;
-      values[i++] = (uint32_t)ev->x;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_Y) {
-      mask |= XCB_CONFIG_WINDOW_Y;
-      values[i++] = (uint32_t)ev->y;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_WIDTH) {
-      mask |= XCB_CONFIG_WINDOW_WIDTH;
-      values[i++] = (uint32_t)ev->width;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_HEIGHT) {
-      mask |= XCB_CONFIG_WINDOW_HEIGHT;
-      values[i++] = (uint32_t)ev->height;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_BORDER_WIDTH) {
-      mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH;
-      values[i++] = (uint32_t)ev->border_width;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_SIBLING) {
-      mask |= XCB_CONFIG_WINDOW_SIBLING;
-      values[i++] = (uint32_t)ev->sibling;
-    }
-    if (ev->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) {
-      mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-      values[i++] = (uint32_t)ev->stack_mode;
+        if (ev->value_mask & XCB_CONFIG_WINDOW_X) {
+            mask |= XCB_CONFIG_WINDOW_X;
+            values[i++] = (uint32_t)ev->x;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_Y) {
+            mask |= XCB_CONFIG_WINDOW_Y;
+            values[i++] = (uint32_t)ev->y;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_WIDTH) {
+            mask |= XCB_CONFIG_WINDOW_WIDTH;
+            values[i++] = (uint32_t)ev->width;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_HEIGHT) {
+            mask |= XCB_CONFIG_WINDOW_HEIGHT;
+            values[i++] = (uint32_t)ev->height;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_BORDER_WIDTH) {
+            mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH;
+            values[i++] = (uint32_t)ev->border_width;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_SIBLING) {
+            mask |= XCB_CONFIG_WINDOW_SIBLING;
+            values[i++] = (uint32_t)ev->sibling;
+        }
+        if (ev->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) {
+            mask |= XCB_CONFIG_WINDOW_STACK_MODE;
+            values[i++] = (uint32_t)ev->stack_mode;
+        }
+
+        xcb_configure_window(wm.conn, ev->window, mask, values);
+
+        if (c) {
+            c->frame.x = ev->x;
+            c->frame.y = ev->y;
+            c->frame.w = ev->width;
+            c->frame.h = ev->height;
+        }
+        return;
     }
 
-    xcb_configure_window(wm.conn, ev->window, mask, values);
-
-    if (c) {
-      c->frame.x = ev->x;
-      c->frame.y = ev->y;
-      c->frame.w = ev->width;
-      c->frame.h = ev->height;
-    }
-    return;
-  }
-
-  layout_monitor(c->mon);
+    layout_monitor(c->mon);
 }

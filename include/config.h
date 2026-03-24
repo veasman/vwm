@@ -59,6 +59,10 @@ typedef enum {
     BAR_MOD_VOLUME,
     BAR_MOD_NETWORK,
     BAR_MOD_BATTERY,
+    BAR_MOD_BRIGHTNESS,
+    BAR_MOD_MEDIA,
+    BAR_MOD_MEMORY,
+    BAR_MOD_WEATHER,
 } BarModuleKind;
 
 typedef struct {
@@ -67,60 +71,63 @@ typedef struct {
 } BarModule;
 
 typedef enum {
-    BAR_STYLE_FLAT = 0,
-    BAR_STYLE_FLOATING,
-} BarStyleMode;
-
-typedef enum {
     BAR_PRESENTATION_MINIMAL = 0,
     BAR_PRESENTATION_ACCENT,
 } BarPresentationMode;
 
+typedef enum {
+    BAR_POSITION_TOP = 0,
+    BAR_POSITION_BOTTOM,
+} BarPosition;
+
+typedef enum {
+    BAR_BACKGROUND_NONE = 0,
+    BAR_BACKGROUND_FLAT,
+    BAR_BACKGROUND_FLOATING,
+} BarBackgroundMode;
+
+typedef enum {
+    BAR_MODULE_STYLE_FLAT = 0,
+    BAR_MODULE_STYLE_PILL,
+} BarModuleStyle;
+
 typedef struct {
-    BarStyleMode mode;
-    BarPresentationMode presentation_mode;
+    uint32_t bg;
+    uint32_t surface;
+    uint32_t text;
+    uint32_t text_muted;
+    uint32_t accent;
+    uint32_t accent_soft;
+    uint32_t border;
+} ThemeConfig;
 
-    int module_gap;
-    int module_padding_x;
-    int module_padding_y;
-    int module_radius;
+typedef struct {
+    int height;
+    BarPosition position;
+    BarModuleStyle modules;
 
-    int floating_margin_x;
-    int floating_margin_y;
+    bool background_enabled;
+    bool use_icons;
+    bool use_colors;
 
-    bool transparent_background;
+    int gap;
+
+    int padding_x;
+    int padding_y;
+
+    int radius;
+
+    int margin_x;
+    int margin_y;
+
+    int content_margin_x;
+    int content_margin_y;
 
     bool volume_bar_enabled;
     int volume_bar_width;
     int volume_bar_height;
     int volume_bar_radius;
-
-    uint32_t module_bg;
-    uint32_t module_fg;
-    uint32_t module_border;
-    int module_border_width;
-
-    uint32_t volume_bar_bg;
-    uint32_t volume_bar_fg_low;
-    uint32_t volume_bar_fg_mid;
-    uint32_t volume_bar_fg_high;
-    uint32_t volume_bar_fg_muted;
-
-    uint32_t accent_monitor;
-    uint32_t accent_sync_enabled;
-    uint32_t accent_sync_disabled;
-
-    uint32_t accent_network_up;
-    uint32_t accent_network_down;
-
-    uint32_t accent_battery_full;
-    uint32_t accent_battery_charging;
-    uint32_t accent_battery_normal;
-    uint32_t accent_battery_low;
-    uint32_t accent_battery_critical;
-
-    uint32_t accent_clock;
-} BarTheme;
+} BarStyleConfig;
 
 typedef struct {
     FloatRule float_rules[MAX_FLOAT_RULES];
@@ -147,7 +154,13 @@ typedef struct {
     BarModule bar_right[MAX_BAR_MODULES_PER_SECTION];
     size_t bar_right_count;
 
-    BarTheme bar_theme;
+    ThemeConfig theme;
+    BarStyleConfig bar_style;
+
+    LayoutKind default_layout;
+    int configured_workspace_count;
+
+    bool bar_enabled;
 } DynamicConfig;
 
 extern DynamicConfig dynconfig;

@@ -2,6 +2,7 @@
 #include "bar.h"
 #include "client.h"
 #include "config.h"
+#include "system_status.h"
 #include "util.h"
 #include "wm.h"
 #include "x11.h"
@@ -61,6 +62,7 @@ int main(void) {
     setup_monitors();
     setup_root();
     apply_config();
+    refresh_system_status(true);
     update_status_cache();
     scan_existing_windows();
     draw_all_bars();

@@ -5,19 +5,28 @@
 #include "config.h"
 #include "x11.h"
 
+static Workspace *overlay_ws_of(Monitor *m) {
+    if (!m) {
+        return NULL;
+    }
+    return &m->scratch_workspace;
+}
+
+static Workspace *active_focus_ws(Monitor *m) {
+    if (!m) {
+        return NULL;
+    }
+
+    if (m->scratchpad_overlay_active) {
+        return overlay_ws_of(m);
+    }
+
+    return ws_of(m, m->current_ws);
+}
+
 uint32_t border_pixel_for_rgb(uint32_t rgb) {
     uint32_t packed = rgb & 0x00ffffffu;
-
-    /*
-     * Force borders fully opaque.
-     *
-     * With ARGB-capable visuals/compositors, writing only 0xRRGGBB can behave
-     * like 0x00RRGGBB, which makes borders effectively transparent.
-     *
-     * For plain 24-bit windows the upper byte is ignored, so this is safe.
-     */
     packed |= 0xff000000u;
-
     return packed;
 }
 
@@ -64,14 +73,17 @@ void center_client_on_monitor(Client *c, Monitor *m) {
         return;
     }
 
-    int w = m->work.w * 3 / 4;
-    int h = m->work.h * 3 / 4;
+    int wpct = CLAMP(wm.config.scratchpad_width_pct, 40, 100);
+    int hpct = CLAMP(wm.config.scratchpad_height_pct, 40, 100);
 
-    if (w < 480) {
-        w = MIN(m->work.w, 480);
+    int w = (m->work.w * wpct) / 100;
+    int h = (m->work.h * hpct) / 100;
+
+    if (w < 900) {
+        w = MIN(m->work.w, 900);
     }
-    if (h < 320) {
-        h = MIN(m->work.h, 320);
+    if (h < 650) {
+        h = MIN(m->work.h, 650);
     }
 
     Rect r = {
@@ -90,37 +102,32 @@ void update_monitor_workarea(Monitor *m) {
         return;
     }
 
-    Workspace *ws = ws_of(m, m->current_ws);
-    bool hide_bar = ws ? ws->hide_bar : false;
+    Workspace *base_ws = ws_of(m, m->current_ws);
+    bool hide_bar = base_ws ? base_ws->hide_bar : false;
 
-    int bar_margin_y = 0;
-
-    if (dynconfig.bar_theme.mode == BAR_STYLE_FLOATING) {
-        bar_margin_y = MAX(0, dynconfig.bar_theme.floating_margin_y);
-    }
-
-    if (hide_bar) {
-        if (m->barwin) {
+    if (!dynconfig.bar_enabled || hide_bar) {
+        if (m->barwin && hide_bar) {
             XUnmapWindow(wm.dpy, (Window)m->barwin);
-            XSync(wm.dpy, False);
         }
 
-        m->work.x = m->geom.x;
-        m->work.y = m->geom.y;
-        m->work.w = m->geom.w;
-        m->work.h = m->geom.h;
+        m->work = m->geom;
         return;
     }
 
     if (m->barwin) {
         XMapRaised(wm.dpy, (Window)m->barwin);
-        XSync(wm.dpy, False);
     }
 
-    m->work.x = m->geom.x;
-    m->work.y = m->geom.y + bar_margin_y + wm.config.bar_height;
-    m->work.w = m->geom.w;
-    m->work.h = MAX(0, m->geom.h - (bar_margin_y + wm.config.bar_height));
+    m->work = m->geom;
+
+    if (dynconfig.bar_style.position == BAR_POSITION_BOTTOM) {
+        m->work.h = MAX(0, m->bar_y - m->geom.y);
+    } else {
+        int bar_bottom = m->bar_y + m->bar_h;
+        int geom_bottom = m->geom.y + m->geom.h;
+        m->work.y = bar_bottom;
+        m->work.h = MAX(0, geom_bottom - bar_bottom);
+    }
 }
 
 void clear_focus_borders_except(Client *keep) {
@@ -129,6 +136,23 @@ void clear_focus_borders_except(Client *keep) {
     };
 
     for (Monitor *m = wm.mons; m; m = m->next) {
+        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
+            if (c == keep) {
+                continue;
+            }
+
+            if (c->is_fullscreen) {
+                continue;
+            }
+
+            xcb_change_window_attributes(
+                wm.conn,
+                c->win,
+                XCB_CW_BORDER_PIXEL,
+                inactive
+            );
+        }
+
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             Workspace *ws = &m->workspaces[i];
 
@@ -162,7 +186,7 @@ int visible_tiled_count(Workspace *ws) {
     return count;
 }
 
-void layout_tile(Monitor *m, Workspace *ws) {
+static void layout_tile_in_area(Monitor *m, Workspace *ws, Rect area) {
     if (!m || !ws) {
         return;
     }
@@ -173,7 +197,6 @@ void layout_tile(Monitor *m, Workspace *ws) {
     }
 
     int gap = ws->gap_px;
-    Rect area = m->work;
     area.x += gap;
     area.y += gap;
     area.w -= gap * 2;
@@ -228,24 +251,40 @@ void layout_tile(Monitor *m, Workspace *ws) {
     }
 }
 
-void layout_monocle(Monitor *m, Workspace *ws) {
+static void layout_floating_clients(Monitor *m, Workspace *ws) {
     if (!m || !ws) {
         return;
     }
 
-    int gap = ws->gap_px;
-    Rect r = m->work;
-    r.x += gap;
-    r.y += gap;
-    r.w -= gap * 2;
-    r.h -= gap * 2;
+    bool is_scratch_ws = (ws == &m->scratch_workspace);
 
     for (Client *c = ws->clients; c; c = c->next) {
-        if (c->is_hidden || c->is_floating || c->is_fullscreen) {
+        if (c->is_hidden) {
             continue;
         }
-        configure_client(c, r);
-        xcb_map_window(wm.conn, c->win);
+
+        if (is_scratch_ws && c->is_scratchpad) {
+            continue;
+        }
+
+        if (c->is_floating) {
+            if (c->frame.w <= 0 || c->frame.h <= 0) {
+                center_client_on_monitor(c, m);
+            } else {
+                configure_client(c, c->frame);
+            }
+            xcb_map_window(wm.conn, c->win);
+        }
+    }
+}
+
+static void hide_workspace_clients(Workspace *ws, uint32_t *inactive) {
+    for (Client *c = ws->clients; c; c = c->next) {
+        c->is_hidden = true;
+        if (!c->is_fullscreen) {
+            xcb_change_window_attributes(wm.conn, c->win, XCB_CW_BORDER_PIXEL, inactive);
+        }
+        xcb_unmap_window(wm.conn, c->win);
     }
 }
 
@@ -254,36 +293,34 @@ void layout_monitor(Monitor *m) {
         return;
     }
 
-    Workspace *ws = ws_of(m, m->current_ws);
-    if (!ws) {
+    Workspace *base_ws = ws_of(m, m->current_ws);
+    Workspace *scratch_ws = overlay_ws_of(m);
+    if (!base_ws || !scratch_ws) {
         return;
     }
 
-    Client *fullscreen = find_fullscreen_client(ws);
-    ws->hide_bar = (fullscreen != NULL);
+    Client *fullscreen = find_fullscreen_client(base_ws);
+    base_ws->hide_bar = (fullscreen != NULL);
 
     update_monitor_workarea(m);
 
-    uint32_t inactive[] = { wm.config.border_inactive };
+    uint32_t inactive[] = { border_pixel_for_rgb(wm.config.border_inactive) };
 
     for (int i = 0; i < WORKSPACE_COUNT; i++) {
         Workspace *other = &m->workspaces[i];
-
-        if (other == ws) {
+        if (other == base_ws) {
             continue;
         }
+        hide_workspace_clients(other, inactive);
+    }
 
-        for (Client *c = other->clients; c; c = c->next) {
-            c->is_hidden = true;
-            if (!c->is_fullscreen) {
-                xcb_change_window_attributes(wm.conn, c->win, XCB_CW_BORDER_PIXEL, inactive);
-            }
-            xcb_unmap_window(wm.conn, c->win);
-        }
+    if (!m->scratchpad_overlay_active) {
+        hide_workspace_clients(scratch_ws, inactive);
+        hide_scratch_overlay(m);
     }
 
     if (fullscreen) {
-        for (Client *c = ws->clients; c; c = c->next) {
+        for (Client *c = base_ws->clients; c; c = c->next) {
             if (c == fullscreen) {
                 c->is_hidden = false;
                 configure_client(c, m->work);
@@ -293,68 +330,57 @@ void layout_monitor(Monitor *m) {
                 xcb_unmap_window(wm.conn, c->win);
             }
         }
-
-        if (m == wm.selmon) {
-            focus_workspace(m);
-        } else {
-            ws->focused = fullscreen;
-            m->focused = fullscreen;
-            draw_bar(m);
-        }
-        return;
-    }
-
-    for (Client *c = ws->clients; c; c = c->next) {
-        if (c->is_scratchpad) {
-            if (!c->is_hidden) {
-                c->is_floating = true;
-                center_client_on_monitor(c, m);
-                xcb_map_window(wm.conn, c->win);
-            }
-            continue;
-        }
-
-        c->is_hidden = false;
-    }
-
-    switch (ws->layout) {
-        case LAYOUT_TILE:
-            layout_tile(m, ws);
-            break;
-        case LAYOUT_MONOCLE:
-            layout_monocle(m, ws);
-            break;
-        case LAYOUT_FLOAT:
-            break;
-    }
-
-    for (Client *c = ws->clients; c; c = c->next) {
-        if (c->is_scratchpad) {
-            continue;
-        }
-
-        if (!c->is_hidden && c->is_floating) {
-            if (c->frame.w <= 0 || c->frame.h <= 0) {
-                center_client_on_monitor(c, m);
-            } else {
-                configure_client(c, c->frame);
-            }
-            xcb_map_window(wm.conn, c->win);
-        }
-    }
-
-    if (m == wm.selmon) {
-        focus_workspace(m);
     } else {
-        Client *c = ws->focused;
+        for (Client *c = base_ws->clients; c; c = c->next) {
+            c->is_hidden = false;
+        }
+
+        layout_tile_in_area(m, base_ws, m->work);
+        layout_floating_clients(m, base_ws);
+    }
+
+    if (m->scratchpad_overlay_active) {
+        show_scratch_overlay(m);
+
+        for (Client *c = scratch_ws->clients; c; c = c->next) {
+            c->is_hidden = false;
+        }
+
+        layout_tile_in_area(m, scratch_ws, m->work);
+        layout_floating_clients(m, scratch_ws);
+    }
+
+    Workspace *focus_ws = active_focus_ws(m);
+    if (m == wm.selmon) {
+        Client *c = focus_ws ? focus_ws->focused : NULL;
         if (!c || c->is_hidden) {
-            c = ws->clients;
+            c = focus_ws ? focus_ws->clients : NULL;
             while (c && c->is_hidden) {
                 c = c->next;
             }
-            ws->focused = c;
+            if (focus_ws) {
+                focus_ws->focused = c;
+            }
         }
-        m->focused = ws->focused;
+
+        if (c) {
+            focus_client(c);
+        } else {
+            m->focused = NULL;
+            draw_all_bars();
+        }
+    } else {
+        Client *c = focus_ws ? focus_ws->focused : NULL;
+        if (!c || c->is_hidden) {
+            c = focus_ws ? focus_ws->clients : NULL;
+            while (c && c->is_hidden) {
+                c = c->next;
+            }
+            if (focus_ws) {
+                focus_ws->focused = c;
+            }
+        }
+        m->focused = c;
         draw_bar(m);
     }
 }

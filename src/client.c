@@ -4,6 +4,7 @@
 #include "config.h"
 #include "layout.h"
 #include "util.h"
+#include "x11.h"
 
 Workspace *ws_of(Monitor *m, int idx) {
     if (!m || idx < 0 || idx >= WORKSPACE_COUNT) {
@@ -12,55 +13,11 @@ Workspace *ws_of(Monitor *m, int idx) {
     return &m->workspaces[idx];
 }
 
-static bool ascii_case_equal(const char *a, const char *b) {
-    if (!a || !b) {
-        return false;
+static Workspace *overlay_ws_of(Monitor *m) {
+    if (!m) {
+        return NULL;
     }
-
-    while (*a && *b) {
-        unsigned char ca = (unsigned char)*a;
-        unsigned char cb = (unsigned char)*b;
-
-        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
-        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
-
-        if (ca != cb) {
-            return false;
-        }
-
-        a++;
-        b++;
-    }
-
-    return *a == '\0' && *b == '\0';
-}
-
-static bool pending_scratchpad_matches_class_reply(
-    const xcb_icccm_get_wm_class_reply_t *class_reply
-) {
-    if (!wm.scratchpad_spawn_pending) {
-        return false;
-    }
-
-    if (!class_reply) {
-        return false;
-    }
-
-    if (wm.pending_scratchpad_class[0] == '\0') {
-        return false;
-    }
-
-    if (class_reply->instance_name &&
-        ascii_case_equal(class_reply->instance_name, wm.pending_scratchpad_class)) {
-        return true;
-    }
-
-    if (class_reply->class_name &&
-        ascii_case_equal(class_reply->class_name, wm.pending_scratchpad_class)) {
-        return true;
-    }
-
-    return false;
+    return &m->scratch_workspace;
 }
 
 Client *first_tiled_client(Workspace *ws) {
@@ -86,7 +43,17 @@ Client *find_fullscreen_client(Workspace *ws) {
 }
 
 bool workspace_has_clients(Workspace *ws) {
-    return ws && ws->clients;
+    if (!ws) {
+        return false;
+    }
+
+    for (Client *c = ws->clients; c; c = c->next) {
+        if (!c->is_scratchpad) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool get_text_property_utf8(xcb_window_t win, xcb_atom_t prop_atom, char *buf, size_t buflen) {
@@ -204,6 +171,23 @@ void focus_client(Client *c) {
     };
 
     for (Monitor *m = wm.mons; m; m = m->next) {
+        for (Client *it = m->scratch_workspace.clients; it; it = it->next) {
+            if (it == c) {
+                continue;
+            }
+
+            if (it->is_fullscreen) {
+                continue;
+            }
+
+            xcb_change_window_attributes(
+                wm.conn,
+                it->win,
+                XCB_CW_BORDER_PIXEL,
+                inactive
+            );
+        }
+
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *it = m->workspaces[i].clients; it; it = it->next) {
                 if (it == c) {
@@ -354,6 +338,12 @@ void detach_from_workspace(Client *c) {
 
 Client *find_scratchpad_client(void) {
     for (Monitor *m = wm.mons; m; m = m->next) {
+        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
+            if (c->is_scratchpad) {
+                return c;
+            }
+        }
+
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *c = m->workspaces[i].clients; c; c = c->next) {
                 if (c->is_scratchpad) {
@@ -415,6 +405,12 @@ void move_client_to_monitor(Client *c, Monitor *dst) {
 
 Client *find_client(xcb_window_t win) {
     for (Monitor *m = wm.mons; m; m = m->next) {
+        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
+            if (c->win == win) {
+                return c;
+            }
+        }
+
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *c = m->workspaces[i].clients; c; c = c->next) {
                 if (c->win == win) {
@@ -488,27 +484,21 @@ void unmanage_client(Client *c) {
     }
 
     if (ws->focused == c) {
-        ws->focused = NULL;
+        ws->focused = c->next ? c->next : c->prev;
     }
 
     if (m && m->focused == c) {
         m->focused = NULL;
     }
 
-    if (wm.scratchpad == c) {
-        wm.scratchpad = NULL;
-    }
-
-    if (wm.scratchpad_spawn_pending &&
-        wm.pending_scratchpad_class[0] != '\0') {
-        wm.scratchpad_spawn_pending = false;
-        wm.pending_scratchpad_name[0] = '\0';
-        wm.pending_scratchpad_class[0] = '\0';
-    }
-
     free(c);
 
     if (m) {
+        if (m->scratchpad_overlay_active && m->scratch_workspace.clients == NULL) {
+            m->scratchpad_overlay_active = false;
+            hide_scratch_overlay(m);
+        }
+
         layout_monitor(m);
     }
 }
@@ -519,7 +509,7 @@ void manage_window(xcb_window_t win) {
     }
 
     for (Monitor *m = wm.mons; m; m = m->next) {
-        if (win == m->barwin) {
+        if (win == m->barwin || win == m->scratch_overlay_win) {
             return;
         }
     }
@@ -551,9 +541,13 @@ void manage_window(xcb_window_t win) {
 
     c->win = win;
     c->mon = wm.selmon;
-    c->ws = ws_of(wm.selmon, wm.selmon->current_ws);
     c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
     c->old_frame = c->frame;
+    c->is_hidden = false;
+    c->is_scratchpad = false;
+
+    bool in_scratch_overlay = wm.selmon->scratchpad_overlay_active;
+    c->ws = in_scratch_overlay ? overlay_ws_of(wm.selmon) : ws_of(wm.selmon, wm.selmon->current_ws);
 
     xcb_icccm_get_wm_class_reply_t class_reply;
     bool have_class = xcb_icccm_get_wm_class_reply(
@@ -563,36 +557,25 @@ void manage_window(xcb_window_t win) {
         NULL
     );
 
-    bool matched_pending_scratchpad = false;
     if (have_class) {
-        matched_pending_scratchpad = pending_scratchpad_matches_class_reply(&class_reply);
-    }
+        if (!in_scratch_overlay) {
+            if ((class_reply.instance_name && class_should_float(class_reply.instance_name)) ||
+                (class_reply.class_name && class_should_float(class_reply.class_name))) {
+                c->is_floating = true;
+            }
 
-    if (matched_pending_scratchpad) {
-        c->is_scratchpad = true;
-        c->is_floating = true;
-        c->is_hidden = false;
-        wm.scratchpad = c;
-        wm.scratchpad_spawn_pending = false;
-        wm.pending_scratchpad_name[0] = '\0';
-        wm.pending_scratchpad_class[0] = '\0';
-    }
-
-    if (have_class) {
-        if ((class_reply.instance_name && class_should_float(class_reply.instance_name)) ||
-            (class_reply.class_name && class_should_float(class_reply.class_name))) {
-            c->is_floating = true;
-        }
-
-        int rule_ws = -1;
-        if (class_reply.instance_name) {
-            rule_ws = class_workspace_rule(class_reply.instance_name);
-        }
-        if (rule_ws < 0 && class_reply.class_name) {
-            rule_ws = class_workspace_rule(class_reply.class_name);
-        }
-        if (rule_ws >= 0) {
-            c->ws = ws_of(wm.selmon, rule_ws);
+            int rule_ws = -1;
+            if (class_reply.instance_name) {
+                rule_ws = class_workspace_rule(class_reply.instance_name);
+            }
+            if (rule_ws < 0 && class_reply.class_name) {
+                rule_ws = class_workspace_rule(class_reply.class_name);
+            }
+            if (rule_ws >= 0) {
+                c->ws = ws_of(wm.selmon, rule_ws);
+            }
+        } else {
+            c->is_floating = false;
         }
     }
 
@@ -616,17 +599,12 @@ void manage_window(xcb_window_t win) {
         xcb_icccm_get_wm_class_reply_wipe(&class_reply);
     }
 
-    if (c->is_scratchpad || c->is_floating) {
+    if (c->is_floating) {
         center_client_on_monitor(c, c->mon);
     }
 
     xcb_map_window(wm.conn, win);
 
     layout_monitor(c->mon);
-
-    if (c->ws == ws_of(c->mon, c->mon->current_ws)) {
-        focus_client(c);
-    } else {
-        draw_all_bars();
-    }
+    focus_client(c);
 }

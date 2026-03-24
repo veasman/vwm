@@ -8,9 +8,17 @@ void cleanup(void) {
     Monitor *m = wm.mons;
     while (m) {
         Monitor *next = m->next;
+
+        if (m->scratch_overlay_win) {
+            XDestroyWindow(wm.dpy, (Window)m->scratch_overlay_win);
+            m->scratch_overlay_win = XCB_WINDOW_NONE;
+        }
+
         if (m->barwin) {
             XDestroyWindow(wm.dpy, (Window)m->barwin);
+            m->barwin = XCB_WINDOW_NONE;
         }
+
         free(m);
         m = next;
     }

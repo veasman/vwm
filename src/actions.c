@@ -4,6 +4,7 @@
 #include "client.h"
 #include "config.h"
 #include "layout.h"
+#include "x11.h"
 
 static const char *launcher_fallback[] = {"rofi", "-show", "drun", NULL};
 
@@ -111,12 +112,31 @@ static void raise_client_above(Client *c) {
     xcb_configure_window(wm.conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE, values);
 }
 
+static Workspace *active_workspace_for_monitor(Monitor *m) {
+    if (!m) {
+        return NULL;
+    }
+
+    if (m->scratchpad_overlay_active) {
+        return &m->scratch_workspace;
+    }
+
+    return ws_of(m, m->current_ws);
+}
+
+static void sync_active_scratchpad_to_monitor_workspace(Monitor *m) {
+    (void)m;
+}
+
 static void set_monitor_workspace(Monitor *m, int idx) {
     if (!m || idx < 0 || idx >= WORKSPACE_COUNT || m->current_ws == idx) {
         return;
     }
+
     m->previous_ws = m->current_ws;
     m->current_ws = idx;
+
+    sync_active_scratchpad_to_monitor_workspace(m);
     layout_monitor(m);
 }
 
@@ -151,7 +171,7 @@ void focus_next(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->clients) {
         return;
     }
@@ -175,7 +195,7 @@ void focus_prev(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->clients) {
         return;
     }
@@ -204,6 +224,10 @@ void focus_monitor_next(const void *arg) {
         return;
     }
 
+    if (wm.selmon->scratchpad_overlay_active) {
+        return;
+    }
+
     wm.selmon = next_monitor(wm.selmon);
     Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
 
@@ -221,6 +245,10 @@ void focus_monitor_next(const void *arg) {
 void focus_monitor_prev(const void *arg) {
     (void)arg;
     if (!wm.selmon) {
+        return;
+    }
+
+    if (wm.selmon->scratchpad_overlay_active) {
         return;
     }
 
@@ -244,7 +272,7 @@ void send_to_monitor_next(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->focused) {
         return;
     }
@@ -258,7 +286,7 @@ void send_to_monitor_prev(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->focused) {
         return;
     }
@@ -269,6 +297,10 @@ void send_to_monitor_prev(const void *arg) {
 void view_workspace(const void *arg) {
     const WorkspaceArg *wa = arg;
     if (!wa || !wm.selmon) {
+        return;
+    }
+
+    if (wm.selmon->scratchpad_overlay_active) {
         return;
     }
 
@@ -290,22 +322,26 @@ void send_to_workspace(const void *arg) {
         return;
     }
 
-    Workspace *cur = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *cur = active_workspace_for_monitor(wm.selmon);
     if (!cur || !cur->focused) {
         return;
     }
 
     Client *c = cur->focused;
-
-    if (wa->workspace == wm.selmon->current_ws || c->is_scratchpad) {
+    Workspace *dst = ws_of(wm.selmon, wa->workspace);
+    if (!dst || cur == dst) {
         return;
     }
 
     detach_from_workspace(c);
-
-    Workspace *dst = ws_of(wm.selmon, wa->workspace);
     c->ws = dst;
+    c->mon = wm.selmon;
     attach_client(dst, c);
+
+    if (cur == &wm.selmon->scratch_workspace && cur->clients == NULL) {
+        wm.selmon->scratchpad_overlay_active = false;
+        hide_scratch_overlay(wm.selmon);
+    }
 
     layout_monitor(wm.selmon);
     focus_workspace(wm.selmon);
@@ -345,7 +381,7 @@ void toggle_fullscreen(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->focused) {
         return;
     }
@@ -375,54 +411,40 @@ void toggle_scratchpad(const void *arg) {
         return;
     }
 
-    if (!wm.scratchpad) {
-        wm.scratchpad = find_scratchpad_client();
-    }
+    Monitor *m = wm.selmon;
+    Workspace *scratch = &m->scratch_workspace;
 
-    if (wm.scratchpad_spawn_pending) {
+    if (m->scratchpad_overlay_active) {
+        m->scratchpad_overlay_active = false;
+        hide_scratch_overlay(m);
+        layout_monitor(m);
+        draw_all_bars();
         return;
     }
 
-    if (!wm.scratchpad) {
-        set_pending_scratchpad_request("legacy", wm.config.scratchpad_class);
+    m->scratchpad_overlay_active = true;
+    show_scratch_overlay(m);
+
+    if (!scratch->clients && wm.config.scratchpad_cmd[0]) {
         spawn(wm.config.scratchpad_cmd);
-        return;
     }
 
-    Client *c = wm.scratchpad;
-    Workspace *target_ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    layout_monitor(m);
 
-    if (!c->is_hidden && c->mon == wm.selmon) {
-        c->is_hidden = true;
-        xcb_unmap_window(wm.conn, c->win);
-
-        if (c->ws && c->ws->focused == c) {
-            c->ws->focused = NULL;
+    if (scratch->focused && !scratch->focused->is_hidden) {
+        focus_client(scratch->focused);
+    } else {
+        Client *c = scratch->clients;
+        while (c && c->is_hidden) {
+            c = c->next;
         }
-        if (c->mon && c->mon->focused == c) {
-            c->mon->focused = NULL;
+        if (c) {
+            scratch->focused = c;
+            focus_client(c);
         }
-
-        layout_monitor(wm.selmon);
-        return;
     }
 
-    if (c->ws != target_ws) {
-        detach_from_workspace(c);
-        c->ws = target_ws;
-        attach_client(target_ws, c);
-    }
-
-    c->mon = wm.selmon;
-    c->is_hidden = false;
-    c->is_floating = true;
-    c->is_scratchpad = true;
-
-    center_client_on_monitor(c, wm.selmon);
-    xcb_map_window(wm.conn, c->win);
-    raise_client_above(c);
-    layout_monitor(wm.selmon);
-    focus_client(c);
+    draw_all_bars();
 }
 
 void toggle_named_scratchpad(const char *name) {
@@ -458,9 +480,11 @@ void toggle_named_scratchpad(const char *name) {
 
     Workspace *target_ws = ws_of(wm.selmon, wm.selmon->current_ws);
 
-    if (!c->is_hidden && c->mon == wm.selmon && c->ws == target_ws) {
+    if (!c->is_hidden && c->mon == wm.selmon && wm.selmon->scratchpad_overlay_active) {
+        wm.selmon->scratchpad_overlay_active = false;
         c->is_hidden = true;
         xcb_unmap_window(wm.conn, c->win);
+        hide_scratch_overlay(wm.selmon);
 
         if (c->ws && c->ws->focused == c) {
             c->ws->focused = NULL;
@@ -470,7 +494,13 @@ void toggle_named_scratchpad(const char *name) {
         }
 
         layout_monitor(wm.selmon);
+        draw_all_bars();
         return;
+    }
+
+    if (c->mon && c->mon != wm.selmon) {
+        c->mon->scratchpad_overlay_active = false;
+        hide_scratch_overlay(c->mon);
     }
 
     if (c->ws != target_ws) {
@@ -483,12 +513,14 @@ void toggle_named_scratchpad(const char *name) {
     c->is_hidden = false;
     c->is_floating = true;
     c->is_scratchpad = true;
+    c->mon->scratchpad_overlay_active = true;
 
     center_client_on_monitor(c, wm.selmon);
     xcb_map_window(wm.conn, c->win);
     raise_client_above(c);
     layout_monitor(wm.selmon);
     focus_client(c);
+    draw_all_bars();
 }
 
 bool client_supports_protocol(Client *c, xcb_atom_t protocol) {
@@ -554,7 +586,7 @@ void kill_client(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->focused) {
         return;
     }
@@ -573,7 +605,7 @@ void decrease_mfact(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws) {
         return;
     }
@@ -588,7 +620,7 @@ void increase_mfact(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws) {
         return;
     }
@@ -603,13 +635,13 @@ void zoom_master(const void *arg) {
         return;
     }
 
-    Workspace *ws = ws_of(wm.selmon, wm.selmon->current_ws);
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
     if (!ws || !ws->focused) {
         return;
     }
 
     Client *c = ws->focused;
-    if (c->is_floating || c->is_scratchpad || c->is_fullscreen) {
+    if (c->is_floating || c->is_fullscreen) {
         return;
     }
 
