@@ -411,15 +411,6 @@ Monitor *add_monitor(int id, int x, int y, int w, int h,
     m->workspaces[i].hide_bar = false;
   }
 
-  m->scratch_workspace.id = WORKSPACE_COUNT;
-  m->scratch_workspace.layout = LAYOUT_TILE;
-  m->scratch_workspace.gap_px = wm.config.gap_px;
-  m->scratch_workspace.mfact = wm.config.default_mfact;
-  m->scratch_workspace.nmaster = 1;
-  m->scratch_workspace.hide_bar = false;
-  m->scratch_workspace.clients = NULL;
-  m->scratch_workspace.focused = NULL;
-
   create_bar(m);
 
   if (!wm.mons) {

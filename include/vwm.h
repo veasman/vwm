@@ -119,7 +119,6 @@ typedef struct {
     char terminal[256];
     char launcher[256];
     char scratchpad[256];
-    char scratchpad_class[256];
 
     int scratchpad_width_pct;
     int scratchpad_height_pct;
@@ -202,10 +201,7 @@ struct Monitor {
     int previous_ws;
 
     Workspace workspaces[WORKSPACE_COUNT];
-    Workspace scratch_workspace;
     Client *focused;
-
-    bool scratchpad_overlay_active;
 
     Monitor *next;
 };
@@ -256,16 +252,15 @@ typedef struct {
 
     bool running;
 
-    bool scratchpad_spawn_pending;
-    char pending_scratchpad_name[64];
-    char pending_scratchpad_class[128];
-
     char status_cache[512];
 
     Cursor hidden_cursor;
 
     Config config;
-    Client *scratchpad;
+    Workspace scratch_workspace;
+    bool scratch_overlay_visible;
+    Monitor *scratch_monitor;
+
     Monitor *mons;
     Monitor *selmon;
     size_t mon_count;

@@ -829,8 +829,6 @@ static void derive_theme_to_runtime(void) {
 }
 
 void rebuild_config_commands(void) {
-    size_t argc = 0;
-
     memset(wm.config.term_cmd_storage, 0, sizeof(wm.config.term_cmd_storage));
     memset(wm.config.launcher_cmd_storage, 0, sizeof(wm.config.launcher_cmd_storage));
     memset(wm.config.scratchpad_cmd_storage, 0, sizeof(wm.config.scratchpad_cmd_storage));
@@ -841,19 +839,7 @@ void rebuild_config_commands(void) {
 
     split_command_argv(wm.config.terminal, wm.config.term_cmd_storage, wm.config.term_cmd, CMD_MAX_ARGS);
     split_command_argv(wm.config.launcher, wm.config.launcher_cmd_storage, wm.config.launcher_cmd, CMD_MAX_ARGS);
-    argc = split_command_argv(wm.config.scratchpad, wm.config.scratchpad_cmd_storage, wm.config.scratchpad_cmd, CMD_MAX_ARGS);
-
-    if (wm.config.scratchpad_class[0] != '\0' && argc + 2 < CMD_MAX_ARGS) {
-        snprintf(wm.config.scratchpad_cmd_storage[argc], sizeof(wm.config.scratchpad_cmd_storage[argc]), "%s", "--class");
-        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
-        argc++;
-
-        snprintf(wm.config.scratchpad_cmd_storage[argc], sizeof(wm.config.scratchpad_cmd_storage[argc]), "%s", wm.config.scratchpad_class);
-        wm.config.scratchpad_cmd[argc] = wm.config.scratchpad_cmd_storage[argc];
-        argc++;
-
-        wm.config.scratchpad_cmd[argc] = NULL;
-    }
+    split_command_argv(wm.config.scratchpad, wm.config.scratchpad_cmd_storage, wm.config.scratchpad_cmd, CMD_MAX_ARGS);
 }
 
 void init_default_keybinds(void) {
@@ -1160,11 +1146,6 @@ static bool parse_scratchpad_overlay_line(const char *raw) {
         return true;
     }
 
-    if (strcmp(argv[0], "class") == 0) {
-        snprintf(wm.config.scratchpad_class, sizeof(wm.config.scratchpad_class), "%s", argv[1]);
-        return true;
-    }
-
     if (strcmp(argv[0], "width_pct") == 0) {
         wm.config.scratchpad_width_pct = CLAMP(atoi(argv[1]), 40, 100);
         return true;
@@ -1445,7 +1426,6 @@ void load_default_config(void) {
     snprintf(wm.config.terminal, sizeof(wm.config.terminal), "kitty");
     snprintf(wm.config.launcher, sizeof(wm.config.launcher), "rofi -show drun");
     snprintf(wm.config.scratchpad, sizeof(wm.config.scratchpad), "kitty");
-    snprintf(wm.config.scratchpad_class, sizeof(wm.config.scratchpad_class), "vwm-scratchpad");
 
     wm.config.scratchpad_width_pct = 92;
     wm.config.scratchpad_height_pct = 92;

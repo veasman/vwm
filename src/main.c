@@ -38,13 +38,12 @@ int main(void) {
     wm.shape_event_base = 0;
     wm.shape_error_base = 0;
 
-    wm.scratchpad_spawn_pending = false;
-    wm.pending_scratchpad_name[0] = '\0';
-    wm.pending_scratchpad_class[0] = '\0';
-    wm.scratchpad = NULL;
-
     wm.xft_font = NULL;
     wm.status_cache[0] = '\0';
+
+    wm.scratch_overlay_visible = false;
+    wm.scratch_monitor = NULL;
+    memset(&wm.scratch_workspace, 0, sizeof(wm.scratch_workspace));
 
     setup_visuals();
 

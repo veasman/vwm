@@ -5,11 +5,27 @@
 #include "config.h"
 #include "x11.h"
 
-static Workspace *overlay_ws_of(Monitor *m) {
-    if (!m) {
-        return NULL;
+static void ensure_scratch_workspace_ready(void) {
+    Workspace *ws = &wm.scratch_workspace;
+
+    if (ws->nmaster <= 0) {
+        ws->id = WORKSPACE_COUNT;
+        ws->layout = LAYOUT_TILE;
+        ws->gap_px = wm.config.gap_px;
+        ws->mfact = wm.config.default_mfact;
+        ws->nmaster = 1;
+        ws->hide_bar = false;
     }
-    return &m->scratch_workspace;
+
+    if (ws->mfact <= 0.0f || ws->mfact >= 1.0f) {
+        ws->mfact = wm.config.default_mfact;
+    }
+
+    ws->gap_px = wm.config.gap_px;
+}
+
+static bool scratch_visible_on_monitor(Monitor *m) {
+    return m && wm.scratch_overlay_visible && wm.scratch_monitor == m;
 }
 
 static Workspace *active_focus_ws(Monitor *m) {
@@ -17,8 +33,9 @@ static Workspace *active_focus_ws(Monitor *m) {
         return NULL;
     }
 
-    if (m->scratchpad_overlay_active) {
-        return overlay_ws_of(m);
+    if (scratch_visible_on_monitor(m)) {
+        ensure_scratch_workspace_ready();
+        return &wm.scratch_workspace;
     }
 
     return ws_of(m, m->current_ws);
@@ -135,24 +152,24 @@ void clear_focus_borders_except(Client *keep) {
         border_pixel_for_rgb(wm.config.border_inactive)
     };
 
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
-            if (c == keep) {
-                continue;
-            }
-
-            if (c->is_fullscreen) {
-                continue;
-            }
-
-            xcb_change_window_attributes(
-                wm.conn,
-                c->win,
-                XCB_CW_BORDER_PIXEL,
-                inactive
-            );
+    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+        if (c == keep) {
+            continue;
         }
 
+        if (c->is_fullscreen) {
+            continue;
+        }
+
+        xcb_change_window_attributes(
+            wm.conn,
+            c->win,
+            XCB_CW_BORDER_PIXEL,
+            inactive
+        );
+    }
+
+    for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             Workspace *ws = &m->workspaces[i];
 
@@ -251,19 +268,13 @@ static void layout_tile_in_area(Monitor *m, Workspace *ws, Rect area) {
     }
 }
 
-static void layout_floating_clients(Monitor *m, Workspace *ws) {
+static void layout_floating_clients(Monitor *m, Workspace *ws, bool raise_above) {
     if (!m || !ws) {
         return;
     }
 
-    bool is_scratch_ws = (ws == &m->scratch_workspace);
-
     for (Client *c = ws->clients; c; c = c->next) {
         if (c->is_hidden) {
-            continue;
-        }
-
-        if (is_scratch_ws && c->is_scratchpad) {
             continue;
         }
 
@@ -273,7 +284,13 @@ static void layout_floating_clients(Monitor *m, Workspace *ws) {
             } else {
                 configure_client(c, c->frame);
             }
+
             xcb_map_window(wm.conn, c->win);
+
+            if (raise_above) {
+                uint32_t above_vals[] = { XCB_STACK_MODE_ABOVE };
+                xcb_configure_window(wm.conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE, above_vals);
+            }
         }
     }
 }
@@ -288,14 +305,25 @@ static void hide_workspace_clients(Workspace *ws, uint32_t *inactive) {
     }
 }
 
+static void hide_scratch_workspace_clients(uint32_t *inactive) {
+    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+        c->is_hidden = true;
+        if (!c->is_fullscreen) {
+            xcb_change_window_attributes(wm.conn, c->win, XCB_CW_BORDER_PIXEL, inactive);
+        }
+        xcb_unmap_window(wm.conn, c->win);
+    }
+}
+
 void layout_monitor(Monitor *m) {
     if (!m) {
         return;
     }
 
+    ensure_scratch_workspace_ready();
+
     Workspace *base_ws = ws_of(m, m->current_ws);
-    Workspace *scratch_ws = overlay_ws_of(m);
-    if (!base_ws || !scratch_ws) {
+    if (!base_ws) {
         return;
     }
 
@@ -312,11 +340,6 @@ void layout_monitor(Monitor *m) {
             continue;
         }
         hide_workspace_clients(other, inactive);
-    }
-
-    if (!m->scratchpad_overlay_active) {
-        hide_workspace_clients(scratch_ws, inactive);
-        hide_scratch_overlay(m);
     }
 
     if (fullscreen) {
@@ -336,18 +359,30 @@ void layout_monitor(Monitor *m) {
         }
 
         layout_tile_in_area(m, base_ws, m->work);
-        layout_floating_clients(m, base_ws);
+        layout_floating_clients(m, base_ws, false);
     }
 
-    if (m->scratchpad_overlay_active) {
+    if (scratch_visible_on_monitor(m)) {
         show_scratch_overlay(m);
 
-        for (Client *c = scratch_ws->clients; c; c = c->next) {
+        for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+            c->mon = m;
             c->is_hidden = false;
         }
 
-        layout_tile_in_area(m, scratch_ws, m->work);
-        layout_floating_clients(m, scratch_ws);
+        layout_tile_in_area(m, &wm.scratch_workspace, m->work);
+        layout_floating_clients(m, &wm.scratch_workspace, true);
+
+        for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+            uint32_t above_vals[] = { XCB_STACK_MODE_ABOVE };
+            xcb_configure_window(wm.conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE, above_vals);
+        }
+    } else {
+        hide_scratch_overlay(m);
+
+        if (!wm.scratch_overlay_visible) {
+            hide_scratch_workspace_clients(inactive);
+        }
     }
 
     Workspace *focus_ws = active_focus_ws(m);

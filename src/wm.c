@@ -25,7 +25,6 @@ void cleanup(void) {
 
     wm.mons = NULL;
     wm.selmon = NULL;
-    wm.scratchpad = NULL;
 
     free_xft_resources();
 

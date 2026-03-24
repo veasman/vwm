@@ -13,11 +13,32 @@ Workspace *ws_of(Monitor *m, int idx) {
     return &m->workspaces[idx];
 }
 
-static Workspace *overlay_ws_of(Monitor *m) {
-    if (!m) {
-        return NULL;
+static void ensure_scratch_workspace_ready(void) {
+    Workspace *ws = &wm.scratch_workspace;
+
+    if (ws->nmaster <= 0) {
+        ws->id = WORKSPACE_COUNT;
+        ws->layout = LAYOUT_TILE;
+        ws->gap_px = wm.config.gap_px;
+        ws->mfact = wm.config.default_mfact;
+        ws->nmaster = 1;
+        ws->hide_bar = false;
     }
-    return &m->scratch_workspace;
+
+    if (ws->mfact <= 0.0f || ws->mfact >= 1.0f) {
+        ws->mfact = wm.config.default_mfact;
+    }
+
+    ws->gap_px = wm.config.gap_px;
+}
+
+static bool scratch_visible_on_monitor(Monitor *m) {
+    return m && wm.scratch_overlay_visible && wm.scratch_monitor == m;
+}
+
+static Workspace *overlay_ws_of(void) {
+    ensure_scratch_workspace_ready();
+    return &wm.scratch_workspace;
 }
 
 Client *first_tiled_client(Workspace *ws) {
@@ -170,24 +191,24 @@ void focus_client(Client *c) {
         XCB_STACK_MODE_ABOVE
     };
 
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        for (Client *it = m->scratch_workspace.clients; it; it = it->next) {
-            if (it == c) {
-                continue;
-            }
-
-            if (it->is_fullscreen) {
-                continue;
-            }
-
-            xcb_change_window_attributes(
-                wm.conn,
-                it->win,
-                XCB_CW_BORDER_PIXEL,
-                inactive
-            );
+    for (Client *it = wm.scratch_workspace.clients; it; it = it->next) {
+        if (it == c) {
+            continue;
         }
 
+        if (it->is_fullscreen) {
+            continue;
+        }
+
+        xcb_change_window_attributes(
+            wm.conn,
+            it->win,
+            XCB_CW_BORDER_PIXEL,
+            inactive
+        );
+    }
+
+    for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *it = m->workspaces[i].clients; it; it = it->next) {
                 if (it == c) {
@@ -291,7 +312,7 @@ void focus_workspace(Monitor *m) {
         return;
     }
 
-    Workspace *ws = ws_of(m, m->current_ws);
+    Workspace *ws = scratch_visible_on_monitor(m) ? overlay_ws_of() : ws_of(m, m->current_ws);
     if (!ws) {
         return;
     }
@@ -337,19 +358,9 @@ void detach_from_workspace(Client *c) {
 }
 
 Client *find_scratchpad_client(void) {
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
-            if (c->is_scratchpad) {
-                return c;
-            }
-        }
-
-        for (int i = 0; i < WORKSPACE_COUNT; i++) {
-            for (Client *c = m->workspaces[i].clients; c; c = c->next) {
-                if (c->is_scratchpad) {
-                    return c;
-                }
-            }
+    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+        if (c->is_scratchpad) {
+            return c;
         }
     }
     return NULL;
@@ -387,14 +398,34 @@ void move_client_to_monitor(Client *c, Monitor *dst) {
     }
 
     Monitor *old_mon = c->mon;
+    bool came_from_scratch = (c->ws == &wm.scratch_workspace);
 
     detach_from_workspace(c);
 
-    c->mon = dst;
-    c->ws = ws_of(dst, dst->current_ws);
+    if (came_from_scratch) {
+        c->ws = &wm.scratch_workspace;
+        c->mon = dst;
+
+        for (Client *it = wm.scratch_workspace.clients; it; it = it->next) {
+            it->mon = dst;
+        }
+
+        if (wm.scratch_overlay_visible) {
+            Monitor *prev = wm.scratch_monitor;
+            wm.scratch_monitor = dst;
+            if (prev && prev != dst) {
+                hide_scratch_overlay(prev);
+                layout_monitor(prev);
+            }
+        }
+    } else {
+        c->mon = dst;
+        c->ws = ws_of(dst, dst->current_ws);
+    }
+
     attach_client(c->ws, c);
 
-    if (c->is_floating || c->is_scratchpad) {
+    if (c->is_floating) {
         center_client_on_monitor(c, dst);
     }
 
@@ -404,13 +435,13 @@ void move_client_to_monitor(Client *c, Monitor *dst) {
 }
 
 Client *find_client(xcb_window_t win) {
-    for (Monitor *m = wm.mons; m; m = m->next) {
-        for (Client *c = m->scratch_workspace.clients; c; c = c->next) {
-            if (c->win == win) {
-                return c;
-            }
+    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+        if (c->win == win) {
+            return c;
         }
+    }
 
+    for (Monitor *m = wm.mons; m; m = m->next) {
         for (int i = 0; i < WORKSPACE_COUNT; i++) {
             for (Client *c = m->workspaces[i].clients; c; c = c->next) {
                 if (c->win == win) {
@@ -436,7 +467,7 @@ void scan_existing_windows(void) {
         bool skip = false;
 
         for (Monitor *m = wm.mons; m; m = m->next) {
-            if (wins[i] == m->barwin) {
+            if (wins[i] == m->barwin || wins[i] == m->scratch_overlay_win) {
                 skip = true;
                 break;
             }
@@ -493,12 +524,19 @@ void unmanage_client(Client *c) {
 
     free(c);
 
-    if (m) {
-        if (m->scratchpad_overlay_active && m->scratch_workspace.clients == NULL) {
-            m->scratchpad_overlay_active = false;
-            hide_scratch_overlay(m);
+    if (ws == &wm.scratch_workspace && wm.scratch_overlay_visible && wm.scratch_workspace.clients == NULL) {
+        Monitor *sm = wm.scratch_monitor;
+        wm.scratch_overlay_visible = false;
+        wm.scratch_monitor = NULL;
+        if (sm) {
+            hide_scratch_overlay(sm);
+            layout_monitor(sm);
         }
+        draw_all_bars();
+        return;
+    }
 
+    if (m) {
         layout_monitor(m);
     }
 }
@@ -539,15 +577,16 @@ void manage_window(xcb_window_t win) {
         die("calloc client failed");
     }
 
+    bool in_scratch_overlay = wm.scratch_overlay_visible && wm.scratch_monitor;
+    Monitor *target_mon = in_scratch_overlay ? wm.scratch_monitor : wm.selmon;
+
     c->win = win;
-    c->mon = wm.selmon;
+    c->mon = target_mon;
     c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
     c->old_frame = c->frame;
     c->is_hidden = false;
     c->is_scratchpad = false;
-
-    bool in_scratch_overlay = wm.selmon->scratchpad_overlay_active;
-    c->ws = in_scratch_overlay ? overlay_ws_of(wm.selmon) : ws_of(wm.selmon, wm.selmon->current_ws);
+    c->ws = in_scratch_overlay ? overlay_ws_of() : ws_of(target_mon, target_mon->current_ws);
 
     xcb_icccm_get_wm_class_reply_t class_reply;
     bool have_class = xcb_icccm_get_wm_class_reply(
@@ -572,7 +611,7 @@ void manage_window(xcb_window_t win) {
                 rule_ws = class_workspace_rule(class_reply.class_name);
             }
             if (rule_ws >= 0) {
-                c->ws = ws_of(wm.selmon, rule_ws);
+                c->ws = ws_of(target_mon, rule_ws);
             }
         } else {
             c->is_floating = false;
