@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -S --noconfirm --needed \
+            base-devel git pkgconf \
+            libx11 libxcb xcb-util-wm xcb-util-keysyms \
+            libxft fontconfig cairo libxrender libxext
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make
+
+      - name: Generate SRCINFO
+        run: make srcinfo
+
+      - name: Verify working tree clean
+        run: git diff --exit-code .SRCINFO

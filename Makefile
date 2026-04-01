@@ -1,11 +1,13 @@
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
+DATADIR ?= $(PREFIX)/share
 
 CC ?= cc
 PKG_CONFIG ?= pkg-config
 
 TARGET := vwm
 BUILD_DIR := build
+APPDIR := $(DATADIR)/vwm
 
 SRC := \
 	src/main.c \
@@ -29,14 +31,14 @@ CFLAGS ?=
 LDFLAGS ?=
 
 PKGS := x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig cairo xrender xext
-PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS))
-PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS)) -lXrender
+PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS) 2>/dev/null)
+PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS) 2>/dev/null) -lXrender
 
-.PHONY: all clean install uninstall run reload check
+.PHONY: all clean check deps-check install uninstall pkg srcinfo reload
 
 all: $(TARGET)
 
-$(TARGET): $(OBJ)
+$(TARGET): check $(OBJ)
 	$(CC) $(OBJ) -o $@ $(LDFLAGS) $(PKG_LIBS)
 
 $(BUILD_DIR):
@@ -45,20 +47,35 @@ $(BUILD_DIR):
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(WARN_CFLAGS) $(OPT_CFLAGS) $(CFLAGS) $(PKG_CFLAGS) -c $< -o $@
 
-clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+check:
+	@$(PKG_CONFIG) --exists $(PKGS) || { \
+		echo "Missing required build dependencies."; \
+		echo "On Arch/Artix install:"; \
+		echo "  doas pacman -S base-devel pkgconf libx11 libxcb xcb-util-wm xcb-util-keysyms libxft fontconfig cairo libxrender libxext"; \
+		exit 1; \
+	}
+
+deps-check: check
+	@echo "build dependencies OK"
 
 install: $(TARGET)
-	./install.sh
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(TARGET)" "$(DESTDIR)$(BINDIR)/$(TARGET)"
+	install -d "$(DESTDIR)$(APPDIR)"
+	install -m 0644 example/vwm.conf "$(DESTDIR)$(APPDIR)/vwm.conf"
 
 uninstall:
-	./uninstall.sh
+	rm -f "$(DESTDIR)$(BINDIR)/$(TARGET)"
+	rm -f "$(DESTDIR)$(APPDIR)/vwm.conf"
 
-run: $(TARGET)
-	./$(TARGET)
+pkg:
+	makepkg -fs
+
+srcinfo:
+	makepkg --printsrcinfo > .SRCINFO
 
 reload:
 	pkill -HUP -x $(TARGET) || true
 
-check: $(TARGET)
-	@echo "build ok"
+clean:
+	rm -rf $(BUILD_DIR) $(TARGET)

@@ -1,0 +1,44 @@
+name: aur-publish
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -S --noconfirm --needed git openssh base-devel pkgconf
+
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Generate SRCINFO
+        run: make srcinfo
+
+      - name: Start ssh-agent
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "$AUR_SSH_PRIVATE_KEY"
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Publish to AUR
+        run: |
+          git clone ssh://aur@aur.archlinux.org/vwm-git.git aur-repo
+          cp PKGBUILD .SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet && exit 0
+          git commit -m "Update vwm-git"
+          git push
