@@ -43,7 +43,7 @@ static Workspace *overlay_ws_of(void) {
 
 Client *first_tiled_client(Workspace *ws) {
     for (Client *c = ws ? ws->clients : NULL; c; c = c->next) {
-        if (!c->is_hidden && !c->is_floating && !c->is_fullscreen) {
+        if (!c->is_floating && !c->is_fullscreen) {
             return c;
         }
     }
@@ -227,6 +227,10 @@ void focus_client(Client *c) {
                 );
             }
         }
+    }
+
+    if (ws->focused && ws->focused != c) {
+        ws->last_focused = ws->focused;
     }
 
     wm.selmon = c->mon;
@@ -514,8 +518,26 @@ void unmanage_client(Client *c) {
         c->next->prev = c->prev;
     }
 
-    if (ws->focused == c) {
-        ws->focused = c->next ? c->next : c->prev;
+    bool was_focused = (ws->focused == c);
+
+    if (ws->last_focused == c) {
+        ws->last_focused = NULL;
+    }
+
+    if (was_focused) {
+        Client *fallback = NULL;
+
+        if (ws->last_focused &&
+            ws->last_focused != c &&
+            !ws->last_focused->is_hidden) {
+            fallback = ws->last_focused;
+        }
+
+        if (!fallback) {
+            fallback = c->next ? c->next : c->prev;
+        }
+
+        ws->focused = fallback;
     }
 
     if (m && m->focused == c) {
@@ -523,6 +545,12 @@ void unmanage_client(Client *c) {
     }
 
     free(c);
+
+    if (was_focused && ws->focused && m) {
+        layout_monitor(m);
+        focus_workspace(m);
+        return;
+    }
 
     if (ws == &wm.scratch_workspace && wm.scratch_overlay_visible && wm.scratch_workspace.clients == NULL) {
         Monitor *sm = wm.scratch_monitor;

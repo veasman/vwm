@@ -16,6 +16,7 @@ typedef enum {
     CFG_BLOCK_BAR,
     CFG_BLOCK_BAR_MODULES,
     CFG_BLOCK_RULES,
+    CFG_BLOCK_AUTOSTART,
     CFG_BLOCK_COMMANDS,
     CFG_BLOCK_SCRATCHPAD,
     CFG_BLOCK_BINDS,
@@ -328,7 +329,8 @@ static bool parse_builtin_action_name(const char *name, Action *out) {
     if (strcmp(name, "focus_monitor_next") == 0) { *out = ACTION_FOCUS_MONITOR_NEXT; return true; }
     if (strcmp(name, "send_monitor_prev") == 0) { *out = ACTION_SEND_MONITOR_PREV; return true; }
     if (strcmp(name, "send_monitor_next") == 0) { *out = ACTION_SEND_MONITOR_NEXT; return true; }
-    if (strcmp(name, "fullscreen") == 0 || strcmp(name, "toggle_fullscreen") == 0) { *out = ACTION_TOGGLE_FULLSCREEN; return true; }
+    if (strcmp(name, "monocle") == 0 || strcmp(name, "toggle_monocle") == 0) { *out = ACTION_TOGGLE_MONOCLE; return true; }
+    if (strcmp(name, "fullscreen") == 0 || strcmp(name, "toggle_fullscreen") == 0) { *out = ACTION_TOGGLE_TRUE_FULLSCREEN; return true; }
     if (strcmp(name, "toggle_sync") == 0 || strcmp(name, "sync") == 0) { *out = ACTION_TOGGLE_SYNC; return true; }
     if (strcmp(name, "kill_client") == 0 || strcmp(name, "kill") == 0) { *out = ACTION_KILL_CLIENT; return true; }
     if (strcmp(name, "decrease_mfact") == 0) { *out = ACTION_DECREASE_MFACT; return true; }
@@ -1119,6 +1121,45 @@ static bool parse_rules_line(const char *raw) {
     return true;
 }
 
+static bool add_autostart_entry(const char *cmdline) {
+    if (!cmdline || !*cmdline) {
+        return false;
+    }
+
+    if (dynconfig.autostart_count >= MAX_AUTOSTART) {
+        fprintf(stderr, "vwm: too many autostart entries\n");
+        return false;
+    }
+
+    AutostartEntry *entry = &dynconfig.autostart[dynconfig.autostart_count++];
+    memset(entry, 0, sizeof(*entry));
+    split_command_argv(cmdline, entry->storage, entry->argv, CMD_MAX_ARGS);
+
+    if (!entry->argv[0]) {
+        dynconfig.autostart_count--;
+        return false;
+    }
+
+    return true;
+}
+
+static bool parse_autostart_line(const char *raw) {
+    char storage[16][256] = {{0}};
+    const char *argv[16] = {0};
+    size_t argc = split_line_tokens(raw, storage, argv, LENGTH(argv));
+
+    if (argc < 2) {
+        return false;
+    }
+
+    if (strcmp(argv[0], "run") == 0) {
+        return add_autostart_entry(argv[1]);
+    }
+
+    fprintf(stderr, "vwm: unknown autostart directive '%s'\n", argv[0]);
+    return true;
+}
+
 static bool parse_commands_line(const char *raw) {
     char storage[16][256] = {{0}};
     const char *argv[16] = {0};
@@ -1132,6 +1173,28 @@ static bool parse_commands_line(const char *raw) {
     return true;
 }
 
+static bool add_scratchpad_autostart_entry(const char *cmdline) {
+    if (!cmdline || !*cmdline) {
+        return false;
+    }
+
+    if (dynconfig.scratchpad_autostart_count >= MAX_SCRATCHPAD_AUTOSTART) {
+        fprintf(stderr, "vwm: too many scratchpad autostart entries\n");
+        return false;
+    }
+
+    AutostartEntry *entry = &dynconfig.scratchpad_autostart[dynconfig.scratchpad_autostart_count++];
+    memset(entry, 0, sizeof(*entry));
+    split_command_argv(cmdline, entry->storage, entry->argv, CMD_MAX_ARGS);
+
+    if (!entry->argv[0]) {
+        dynconfig.scratchpad_autostart_count--;
+        return false;
+    }
+
+    return true;
+}
+
 static bool parse_scratchpad_overlay_line(const char *raw) {
     char storage[16][256] = {{0}};
     const char *argv[16] = {0};
@@ -1139,6 +1202,11 @@ static bool parse_scratchpad_overlay_line(const char *raw) {
 
     if (argc < 2) {
         return false;
+    }
+
+    if (strcmp(argv[0], "autostart") == 0) {
+        add_scratchpad_autostart_entry(argv[1]);
+        return true;
     }
 
     if (strcmp(argv[0], "command") == 0) {
@@ -1164,6 +1232,7 @@ static bool parse_scratchpad_overlay_line(const char *raw) {
     fprintf(stderr, "vwm: unknown scratchpad key '%s'\n", argv[0]);
     return true;
 }
+
 
 static bool parse_binds_line(const char *raw) {
     char storage[16][256] = {{0}};
@@ -1254,6 +1323,7 @@ static bool is_root_block_name(const char *name) {
         strcmp(name, "theme") == 0 ||
         strcmp(name, "bar") == 0 ||
         strcmp(name, "rules") == 0 ||
+        strcmp(name, "autostart") == 0 ||
         strcmp(name, "commands") == 0 ||
         strcmp(name, "scratchpad") == 0 ||
         strcmp(name, "binds") == 0;
@@ -1334,6 +1404,7 @@ void load_config_file_recursive(const char *path, int depth) {
                 if (strcmp(name, "theme") == 0) { block = CFG_BLOCK_THEME; continue; }
                 if (strcmp(name, "bar") == 0) { block = CFG_BLOCK_BAR; continue; }
                 if (strcmp(name, "rules") == 0) { block = CFG_BLOCK_RULES; continue; }
+                if (strcmp(name, "autostart") == 0) { block = CFG_BLOCK_AUTOSTART; continue; }
                 if (strcmp(name, "commands") == 0) { block = CFG_BLOCK_COMMANDS; continue; }
                 if (strcmp(name, "scratchpad") == 0) { block = CFG_BLOCK_SCRATCHPAD; continue; }
                 if (strcmp(name, "binds") == 0) { block = CFG_BLOCK_BINDS; continue; }
@@ -1377,6 +1448,9 @@ void load_config_file_recursive(const char *path, int depth) {
                 break;
             case CFG_BLOCK_RULES:
                 parse_rules_line(raw);
+                break;
+            case CFG_BLOCK_AUTOSTART:
+                parse_autostart_line(raw);
                 break;
             case CFG_BLOCK_COMMANDS:
                 parse_commands_line(raw);
@@ -1472,4 +1546,20 @@ void reload_config(const void *arg) {
     apply_config();
 
     fprintf(stderr, "vwm: config reloaded from %s\n", wm.config.path);
+}
+
+void run_autostart(void) {
+    for (size_t i = 0; i < dynconfig.autostart_count; i++) {
+        if (dynconfig.autostart[i].argv[0]) {
+            spawn(dynconfig.autostart[i].argv);
+        }
+    }
+}
+
+void run_scratchpad_autostart(void) {
+    for (size_t i = 0; i < dynconfig.scratchpad_autostart_count; i++) {
+        if (dynconfig.scratchpad_autostart[i].argv[0]) {
+            spawn(dynconfig.scratchpad_autostart[i].argv);
+        }
+    }
 }

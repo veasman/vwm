@@ -61,7 +61,8 @@ typedef enum {
     ACTION_FOCUS_MONITOR_NEXT,
     ACTION_SEND_MONITOR_PREV,
     ACTION_SEND_MONITOR_NEXT,
-    ACTION_TOGGLE_FULLSCREEN,
+    ACTION_TOGGLE_MONOCLE,
+    ACTION_TOGGLE_TRUE_FULLSCREEN,
     ACTION_TOGGLE_SYNC,
     ACTION_KILL_CLIENT,
     ACTION_QUIT,
@@ -181,6 +182,7 @@ struct Workspace {
 
     Client *clients;
     Client *focused;
+    Client *last_focused;
 };
 
 struct Monitor {

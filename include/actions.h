@@ -19,7 +19,8 @@ void send_to_workspace(const void *arg);
 void toggle_sync_workspaces(const void *arg);
 
 void set_client_fullscreen_state(Client *c, bool enabled);
-void toggle_fullscreen(const void *arg);
+void toggle_monocle(const void *arg);
+void toggle_true_fullscreen(const void *arg);
 void toggle_scratchpad(const void *arg);
 void toggle_named_scratchpad(const char *name);
 

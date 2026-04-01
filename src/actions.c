@@ -98,8 +98,12 @@ static void open_scratch_overlay_on(Monitor *m) {
 
     show_scratch_overlay(m);
 
-    if (!wm.scratch_workspace.clients && wm.config.scratchpad_cmd[0]) {
-        spawn(wm.config.scratchpad_cmd);
+    if (!wm.scratch_workspace.clients) {
+        if (dynconfig.scratchpad_autostart_count > 0) {
+            run_scratchpad_autostart();
+        } else if (wm.config.scratchpad_cmd[0]) {
+            spawn(wm.config.scratchpad_cmd);
+        }
     }
 
     layout_monitor(m);
@@ -120,11 +124,68 @@ static void open_scratch_overlay_on(Monitor *m) {
     draw_all_bars();
 }
 
+static char *expand_spawn_arg(const char *arg) {
+    if (!arg) {
+        return NULL;
+    }
+
+    if (arg[0] != '~') {
+        return strdup(arg);
+    }
+
+    const char *home = getenv("HOME");
+    if (!home || home[0] == '\0') {
+        return strdup(arg);
+    }
+
+    if (arg[1] == '\0') {
+        return strdup(home);
+    }
+
+    if (arg[1] == '/') {
+        size_t need = strlen(home) + strlen(arg + 1) + 1;
+        char *out = calloc(1, need);
+        if (!out) {
+            return NULL;
+        }
+
+        snprintf(out, need, "%s%s", home, arg + 1);
+        return out;
+    }
+
+    return strdup(arg);
+}
+
+static void free_spawn_argv(char **argv, size_t argc) {
+    if (!argv) {
+        return;
+    }
+
+    for (size_t i = 0; i < argc; i++) {
+        free(argv[i]);
+        argv[i] = NULL;
+    }
+}
+
 void spawn(const void *arg) {
     const char *const *cmd = arg;
     if (!cmd || !cmd[0]) {
         return;
     }
+
+    char *argv[CMD_MAX_ARGS] = {0};
+    size_t argc = 0;
+
+    while (cmd[argc] && argc + 1 < CMD_MAX_ARGS) {
+        argv[argc] = expand_spawn_arg(cmd[argc]);
+        if (!argv[argc]) {
+            free_spawn_argv(argv, argc);
+            fprintf(stderr, "vwm: failed to expand command argument\n");
+            return;
+        }
+        argc++;
+    }
+    argv[argc] = NULL;
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -134,10 +195,21 @@ void spawn(const void *arg) {
             close(xcb_get_file_descriptor(wm.conn));
         }
 
-        execvp(cmd[0], (char *const *)cmd);
-        fprintf(stderr, "execvp failed for %s: %s\n", cmd[0], strerror(errno));
+        const char *path = getenv("PATH");
+        if (!path || path[0] == '\0') {
+            setenv(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                1
+            );
+        }
+
+        execvp(argv[0], argv);
+        fprintf(stderr, "execvp failed for %s: %s\n", argv[0], strerror(errno));
         _exit(1);
     }
+
+    free_spawn_argv(argv, argc);
 }
 
 void quit(const void *arg) {
@@ -156,16 +228,30 @@ void focus_next(const void *arg) {
         return;
     }
 
-    Client *c = ws->focused && ws->focused->next ? ws->focused->next : ws->clients;
-    while (c && c->is_hidden) {
-        c = c->next ? c->next : ws->clients;
-        if (c == ws->focused) {
-            break;
+    bool monocle = (ws->layout == LAYOUT_MONOCLE);
+
+    Client *start = ws->focused ? ws->focused : ws->clients;
+    Client *c = start->next ? start->next : ws->clients;
+
+    while (c && c != start) {
+        if (!c->is_floating && !c->is_fullscreen) {
+            if (monocle || !c->is_hidden) {
+                ws->focused = c;
+                layout_monitor(wm.selmon);
+                focus_client(c);
+                return;
+            }
         }
+
+        c = c->next ? c->next : ws->clients;
     }
 
-    if (c && !c->is_hidden) {
-        focus_client(c);
+    if (start && !start->is_floating && !start->is_fullscreen) {
+        if (monocle || !start->is_hidden) {
+            ws->focused = start;
+            layout_monitor(wm.selmon);
+            focus_client(start);
+        }
     }
 }
 
@@ -180,21 +266,35 @@ void focus_prev(const void *arg) {
         return;
     }
 
+    bool monocle = (ws->layout == LAYOUT_MONOCLE);
+
     Client *last = ws->clients;
     while (last->next) {
         last = last->next;
     }
 
-    Client *c = ws->focused && ws->focused->prev ? ws->focused->prev : last;
-    while (c && c->is_hidden) {
-        c = c->prev ? c->prev : last;
-        if (c == ws->focused) {
-            break;
+    Client *start = ws->focused ? ws->focused : last;
+    Client *c = start->prev ? start->prev : last;
+
+    while (c && c != start) {
+        if (!c->is_floating && !c->is_fullscreen) {
+            if (monocle || !c->is_hidden) {
+                ws->focused = c;
+                layout_monitor(wm.selmon);
+                focus_client(c);
+                return;
+            }
         }
+
+        c = c->prev ? c->prev : last;
     }
 
-    if (c && !c->is_hidden) {
-        focus_client(c);
+    if (start && !start->is_floating && !start->is_fullscreen) {
+        if (monocle || !start->is_hidden) {
+            ws->focused = start;
+            layout_monitor(wm.selmon);
+            focus_client(start);
+        }
     }
 }
 
@@ -356,7 +456,28 @@ void set_client_fullscreen_state(Client *c, bool enabled) {
     }
 }
 
-void toggle_fullscreen(const void *arg) {
+void toggle_monocle(const void *arg) {
+    (void)arg;
+
+    if (!wm.selmon) {
+        return;
+    }
+
+    Workspace *ws = active_workspace_for_monitor(wm.selmon);
+    if (!ws) {
+        return;
+    }
+
+    if (ws->layout == LAYOUT_MONOCLE) {
+        ws->layout = LAYOUT_TILE;
+    } else {
+        ws->layout = LAYOUT_MONOCLE;
+    }
+
+    layout_monitor(wm.selmon);
+}
+
+void toggle_true_fullscreen(const void *arg) {
     (void)arg;
     if (!wm.selmon) {
         return;
@@ -571,8 +692,11 @@ void dispatch_action(Action action) {
         case ACTION_SEND_MONITOR_NEXT:
             send_to_monitor_next(NULL);
             break;
-        case ACTION_TOGGLE_FULLSCREEN:
-            toggle_fullscreen(NULL);
+        case ACTION_TOGGLE_MONOCLE:
+            toggle_monocle(NULL);
+            break;
+        case ACTION_TOGGLE_TRUE_FULLSCREEN:
+            toggle_true_fullscreen(NULL);
             break;
         case ACTION_TOGGLE_SYNC:
             toggle_sync_workspaces(NULL);

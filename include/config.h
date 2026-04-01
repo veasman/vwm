@@ -3,12 +3,19 @@
 
 #include "vwm.h"
 
+#define MAX_AUTOSTART 64
+#define MAX_SCRATCHPAD_AUTOSTART 16
 #define MAX_FLOAT_RULES 64
 #define MAX_WORKSPACE_RULES 64
 #define MAX_DYNAMIC_COMMANDS 64
 #define MAX_DYNAMIC_KEYBINDS 128
 #define MAX_DYNAMIC_SCRATCHPADS 32
 #define MAX_BAR_MODULES_PER_SECTION 16
+
+typedef struct {
+    char storage[CMD_MAX_ARGS][256];
+    const char *argv[CMD_MAX_ARGS];
+} AutostartEntry;
 
 typedef struct {
     char class_name[128];
@@ -130,6 +137,12 @@ typedef struct {
 } BarStyleConfig;
 
 typedef struct {
+    AutostartEntry autostart[MAX_AUTOSTART];
+    size_t autostart_count;
+
+    AutostartEntry scratchpad_autostart[MAX_SCRATCHPAD_AUTOSTART];
+    size_t scratchpad_autostart_count;
+
     FloatRule float_rules[MAX_FLOAT_RULES];
     size_t float_rule_count;
 
@@ -184,6 +197,9 @@ bool parse_bool_value(const char *s, bool *out);
 bool parse_color_value(const char *s, uint32_t *out);
 void config_unquote_inplace(char *s);
 void sanitize_config(void);
+
+void run_autostart(void);
+void run_scratchpad_autostart(void);
 
 bool class_should_float(const char *class_name);
 int class_workspace_rule(const char *class_name);

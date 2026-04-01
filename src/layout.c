@@ -268,6 +268,43 @@ static void layout_tile_in_area(Monitor *m, Workspace *ws, Rect area) {
     }
 }
 
+static void layout_monocle_in_area(Monitor *m, Workspace *ws, Rect area) {
+    if (!m || !ws) {
+        return;
+    }
+
+    int gap = ws->gap_px;
+    area.x += gap;
+    area.y += gap;
+    area.w -= gap * 2;
+    area.h -= gap * 2;
+
+    if (area.w <= 0 || area.h <= 0) {
+        return;
+    }
+
+    Client *focused = ws->focused;
+    if (!focused || focused->is_floating || focused->is_fullscreen) {
+        focused = first_tiled_client(ws);
+        ws->focused = focused;
+    }
+
+    for (Client *c = ws->clients; c; c = c->next) {
+        if (c->is_floating || c->is_fullscreen) {
+            continue;
+        }
+
+        if (c == focused) {
+            c->is_hidden = false;
+            configure_client(c, area);
+            xcb_map_window(wm.conn, c->win);
+        } else {
+            c->is_hidden = true;
+            xcb_unmap_window(wm.conn, c->win);
+        }
+    }
+}
+
 static void layout_floating_clients(Monitor *m, Workspace *ws, bool raise_above) {
     if (!m || !ws) {
         return;
@@ -358,7 +395,12 @@ void layout_monitor(Monitor *m) {
             c->is_hidden = false;
         }
 
-        layout_tile_in_area(m, base_ws, m->work);
+        if (base_ws->layout == LAYOUT_MONOCLE) {
+            layout_monocle_in_area(m, base_ws, m->work);
+        } else {
+            layout_tile_in_area(m, base_ws, m->work);
+        }
+
         layout_floating_clients(m, base_ws, false);
     }
 

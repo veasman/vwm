@@ -256,8 +256,10 @@ static void draw_workspace_dots_any(Monitor *m, cairo_t *cr, XftDraw *xftdraw, i
 
         char label[16];
         const char *glyph = NULL;
-        XftColor *xft_color = &wm.xft_ws_empty;
-        uint32_t cairo_color = wm.config.workspace_empty;
+        XftColor *xft_color = &wm.xft_ws_occupied;
+        uint32_t cairo_color = wm.config.workspace_occupied;
+        //XftColor *xft_color = &wm.xft_ws_empty;
+        //uint32_t cairo_color = wm.config.workspace_empty;
 
         if (current) {
             xft_color = &wm.xft_ws_current;

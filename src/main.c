@@ -61,6 +61,7 @@ int main(void) {
     setup_monitors();
     setup_root();
     apply_config();
+    run_autostart();
     refresh_system_status(true);
     update_status_cache();
     scan_existing_windows();
