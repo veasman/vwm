@@ -34,7 +34,7 @@ PKGS := x11 x11-xcb xcb xcb-randr xcb-icccm xcb-keysyms xft fontconfig cairo xre
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS) 2>/dev/null)
 PKG_LIBS := $(shell $(PKG_CONFIG) --libs $(PKGS) 2>/dev/null) -lXrender
 
-.PHONY: all clean check deps-check install uninstall pkg srcinfo reload
+.PHONY: all clean check deps-check install install-config uninstall pkg srcinfo reload
 
 all: $(TARGET)
 
@@ -62,10 +62,23 @@ install: $(TARGET)
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -m 0755 "$(TARGET)" "$(DESTDIR)$(BINDIR)/$(TARGET)"
 	install -d "$(DESTDIR)$(APPDIR)"
-	install -m 0644 example/vwm.conf "$(DESTDIR)$(APPDIR)/vwm.conf"
+	install -m 0644 example/vwm.conf "$(DESTDIR)$(APPDIR)/vwm.conf.example"
+	@if [ -z "$(DESTDIR)" ] && [ ! -f "$(APPDIR)/vwm.conf" ]; then \
+		install -m 0644 example/vwm.conf "$(APPDIR)/vwm.conf"; \
+	fi
+
+install-config:
+	@mkdir -p "$(HOME)/.config/vwm"
+	@if [ -f "$(HOME)/.config/vwm/vwm.conf" ]; then \
+		echo "Config already exists: ~/.config/vwm/vwm.conf (not overwriting)"; \
+	else \
+		install -m 0644 example/vwm.conf "$(HOME)/.config/vwm/vwm.conf"; \
+		echo "Installed config: ~/.config/vwm/vwm.conf"; \
+	fi
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/$(TARGET)"
+	rm -f "$(DESTDIR)$(APPDIR)/vwm.conf.example"
 	rm -f "$(DESTDIR)$(APPDIR)/vwm.conf"
 
 pkg:

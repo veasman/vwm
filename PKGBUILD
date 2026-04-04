@@ -27,4 +27,5 @@ build() {
 package() {
 	cd "$srcdir/vwm"
 	make DESTDIR="$pkgdir" PREFIX=/usr DATADIR=/usr/share install
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
