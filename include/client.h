@@ -6,8 +6,10 @@
 Workspace *ws_of(Monitor *m, int idx);
 Client *find_client(xcb_window_t win);
 
+void ensure_scratch_workspace_ready(void);
+bool scratch_visible_on_monitor(Monitor *m);
+
 void get_client_title(Client *c, char *buf, size_t buflen);
-Client *find_scratchpad_client(void);
 Client *find_fullscreen_client(Workspace *ws);
 Client *first_tiled_client(Workspace *ws);
 bool workspace_has_clients(Workspace *ws);

@@ -164,7 +164,6 @@ struct Client {
 
     bool is_floating;
     bool is_fullscreen;
-    bool is_scratchpad;
     bool is_urgent;
     bool is_hidden;
 

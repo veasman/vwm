@@ -5,29 +5,6 @@
 #include "config.h"
 #include "x11.h"
 
-static void ensure_scratch_workspace_ready(void) {
-    Workspace *ws = &wm.scratch_workspace;
-
-    if (ws->nmaster <= 0) {
-        ws->id = WORKSPACE_COUNT;
-        ws->layout = LAYOUT_TILE;
-        ws->gap_px = wm.config.gap_px;
-        ws->mfact = wm.config.default_mfact;
-        ws->nmaster = 1;
-        ws->hide_bar = false;
-    }
-
-    if (ws->mfact <= 0.0f || ws->mfact >= 1.0f) {
-        ws->mfact = wm.config.default_mfact;
-    }
-
-    ws->gap_px = wm.config.gap_px;
-}
-
-static bool scratch_visible_on_monitor(Monitor *m) {
-    return m && wm.scratch_overlay_visible && wm.scratch_monitor == m;
-}
-
 static Workspace *active_focus_ws(Monitor *m) {
     if (!m) {
         return NULL;

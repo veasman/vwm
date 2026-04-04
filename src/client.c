@@ -13,7 +13,7 @@ Workspace *ws_of(Monitor *m, int idx) {
     return &m->workspaces[idx];
 }
 
-static void ensure_scratch_workspace_ready(void) {
+void ensure_scratch_workspace_ready(void) {
     Workspace *ws = &wm.scratch_workspace;
 
     if (ws->nmaster <= 0) {
@@ -32,7 +32,7 @@ static void ensure_scratch_workspace_ready(void) {
     ws->gap_px = wm.config.gap_px;
 }
 
-static bool scratch_visible_on_monitor(Monitor *m) {
+bool scratch_visible_on_monitor(Monitor *m) {
     return m && wm.scratch_overlay_visible && wm.scratch_monitor == m;
 }
 
@@ -64,17 +64,7 @@ Client *find_fullscreen_client(Workspace *ws) {
 }
 
 bool workspace_has_clients(Workspace *ws) {
-    if (!ws) {
-        return false;
-    }
-
-    for (Client *c = ws->clients; c; c = c->next) {
-        if (!c->is_scratchpad) {
-            return true;
-        }
-    }
-
-    return false;
+    return ws && ws->clients;
 }
 
 bool get_text_property_utf8(xcb_window_t win, xcb_atom_t prop_atom, char *buf, size_t buflen) {
@@ -361,15 +351,6 @@ void detach_from_workspace(Client *c) {
     c->prev = NULL;
 }
 
-Client *find_scratchpad_client(void) {
-    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
-        if (c->is_scratchpad) {
-            return c;
-        }
-    }
-    return NULL;
-}
-
 Monitor *next_monitor(Monitor *m) {
     if (!m) {
         return wm.mons;
@@ -613,7 +594,6 @@ void manage_window(xcb_window_t win) {
     c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
     c->old_frame = c->frame;
     c->is_hidden = false;
-    c->is_scratchpad = false;
     c->ws = in_scratch_overlay ? overlay_ws_of() : ws_of(target_mon, target_mon->current_ws);
 
     xcb_icccm_get_wm_class_reply_t class_reply;
