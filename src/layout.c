@@ -67,17 +67,26 @@ void center_client_on_monitor(Client *c, Monitor *m) {
         return;
     }
 
-    int wpct = CLAMP(wm.config.scratchpad_width_pct, 40, 100);
-    int hpct = CLAMP(wm.config.scratchpad_height_pct, 40, 100);
+    int w, h;
 
-    int w = (m->work.w * wpct) / 100;
-    int h = (m->work.h * hpct) / 100;
+    /* If the client already has a requested size (from its X geometry),
+       respect it.  Otherwise fall back to scratchpad dimensions. */
+    if (c->frame.w > 0 && c->frame.h > 0) {
+        w = MIN(c->frame.w, m->work.w);
+        h = MIN(c->frame.h, m->work.h);
+    } else {
+        int wpct = CLAMP(wm.config.scratchpad_width_pct, 40, 100);
+        int hpct = CLAMP(wm.config.scratchpad_height_pct, 40, 100);
 
-    if (w < 900) {
-        w = MIN(m->work.w, 900);
-    }
-    if (h < 650) {
-        h = MIN(m->work.h, 650);
+        w = (m->work.w * wpct) / 100;
+        h = (m->work.h * hpct) / 100;
+
+        if (w < 900) {
+            w = MIN(m->work.w, 900);
+        }
+        if (h < 650) {
+            h = MIN(m->work.h, 650);
+        }
     }
 
     Rect r = {

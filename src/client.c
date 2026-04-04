@@ -518,8 +518,7 @@ void unmanage_client(Client *c) {
         Client *fallback = NULL;
 
         if (ws->last_focused &&
-            ws->last_focused != c &&
-            !ws->last_focused->is_hidden) {
+            ws->last_focused != c) {
             fallback = ws->last_focused;
         }
 
@@ -600,7 +599,22 @@ void manage_window(xcb_window_t win) {
 
     c->win = win;
     c->mon = target_mon;
-    c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
+
+    /* Read the window's requested geometry so floating clients can keep
+       their preferred size instead of being forced to scratchpad dims. */
+    xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(wm.conn, win);
+    xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(wm.conn, geom_cookie, NULL);
+    if (geom && geom->width > 0 && geom->height > 0) {
+        c->frame = (Rect){
+            .x = geom->x,
+            .y = geom->y,
+            .w = geom->width,
+            .h = geom->height,
+        };
+    } else {
+        c->frame = (Rect){ .x = 0, .y = 0, .w = 0, .h = 0 };
+    }
+    free(geom);
     c->old_frame = c->frame;
     c->is_hidden = false;
     c->ws = in_scratch_overlay ? overlay_ws_of() : ws_of(target_mon, target_mon->current_ws);
@@ -665,6 +679,9 @@ void manage_window(xcb_window_t win) {
         center_client_on_monitor(c, c->mon);
     }
 
+    if (c->ws->focused && c->ws->focused != c) {
+        c->ws->last_focused = c->ws->focused;
+    }
     c->ws->focused = c;
 
     xcb_map_window(wm.conn, win);
