@@ -1,5 +1,6 @@
 #include "client.h"
 
+#include "actions.h"
 #include "bar.h"
 #include "config.h"
 #include "layout.h"
@@ -410,9 +411,17 @@ void move_client_to_monitor(Client *c, Monitor *dst) {
 
     attach_client(c->ws, c);
 
+    Client *fs = find_fullscreen_client(c->ws);
+    if (fs && fs != c) {
+        fs->is_fullscreen = false;
+        set_client_fullscreen_state(fs, false);
+    }
+
     if (c->is_floating) {
         center_client_on_monitor(c, dst);
     }
+
+    c->ws->focused = c;
 
     layout_monitor(old_mon);
     layout_monitor(dst);
@@ -646,9 +655,17 @@ void manage_window(xcb_window_t win) {
         xcb_icccm_get_wm_class_reply_wipe(&class_reply);
     }
 
+    Client *fs = find_fullscreen_client(c->ws);
+    if (fs && fs != c) {
+        fs->is_fullscreen = false;
+        set_client_fullscreen_state(fs, false);
+    }
+
     if (c->is_floating) {
         center_client_on_monitor(c, c->mon);
     }
+
+    c->ws->focused = c;
 
     xcb_map_window(wm.conn, win);
 

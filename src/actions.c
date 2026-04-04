@@ -397,6 +397,12 @@ void send_to_workspace(const void *arg) {
     c->mon = wm.selmon;
     attach_client(dst, c);
 
+    Client *fs = find_fullscreen_client(dst);
+    if (fs && fs != c) {
+        fs->is_fullscreen = false;
+        set_client_fullscreen_state(fs, false);
+    }
+
     if (cur == &wm.scratch_workspace && cur->clients == NULL) {
         close_scratch_overlay();
     } else {
