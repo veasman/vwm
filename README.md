@@ -11,12 +11,13 @@ Built for Arch Linux and Artix Linux.
 - True fullscreen mode
 - Multi-monitor support with synced workspaces
 - Scratchpad overlay with multiple autostart windows and named scratchpads
-- Status bar with built-in and script modules
+- Cairo status bar with built-in and script modules
 - Workspace and float rules with monitor targeting
 - Autostart with workspace/monitor placement
+- Theme system with accent colors
 - Config reload via `SIGHUP`
 - Config file includes (max depth 16)
-- Command and keybind configuration
+- Named commands and fully configurable keybinds
 
 ## Build Dependencies
 
@@ -71,7 +72,7 @@ Config path:
 ~/.config/vwm/vwm.conf
 ```
 
-An example config ships in `example/vwm.conf`.
+A fully documented example config ships in `example/vwm.conf`.
 
 ### Reload
 
@@ -81,6 +82,15 @@ pkill -HUP -x vwm
 make reload
 ```
 
+### Includes
+
+Split config across files:
+
+```
+include "~/.config/vwm/theme.conf"
+include "~/.local/state/loom/generated/vwm-theme.conf"
+```
+
 ### Layouts
 
 | Layout | Description |
@@ -88,6 +98,24 @@ make reload
 | Tile | Master-stack with configurable master factor and count |
 | Monocle | Single focused window, cycle with focus next/prev |
 | Fullscreen | True borderless fullscreen for focused window |
+
+New windows always take the spotlight. Moving or spawning a window onto a fullscreen workspace automatically exits fullscreen for the existing window.
+
+### Theme
+
+```
+theme {
+    bg 0x111111
+    surface 0x1b1b1b
+    text 0xf2f2f2
+    text_muted 0x5c5c5c
+    accent 0x6bacac
+    accent_soft 0x458588
+    border 0x353535
+}
+```
+
+Theme colors derive border, bar, and workspace indicator colors at runtime.
 
 ### Scratchpad
 
@@ -141,51 +169,78 @@ autostart {
 }
 ```
 
-### Bar Modules
+### Commands
 
-Built-in modules: `monitor`, `workspaces`, `sync`, `title`, `status`, `clock`, `volume`, `network`, `battery`, `brightness`, `media`, `memory`, `weather`, `custom`.
+Named commands referenced by keybinds:
 
-Pre-packaged script modules with caching and configurable refresh intervals:
+```
+commands {
+    browser "floorp"
+    launcher "rofi -show drun"
+    terminal "kitty"
+    vol-up "wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+"
+}
+
+binds {
+    "mod+w" spawn "browser"
+    "mod+d" spawn "launcher"
+    "mod+Return" spawn "terminal"
+    "XF86AudioRaiseVolume" spawn "vol-up"
+}
+```
+
+### Bar
+
+Cairo-rendered status bar with configurable module placement, flat or pill style, and per-module state-aware coloring:
 
 ```
 bar {
+    enabled true
+    position top
+    height 24
+    modules pill
+    icons true
+    colors true
+
     modules {
         left monitor
         left workspaces
         center title
         right script:cpu
-        right script:updates
-        right script:disk
         right volume
         right clock "%a %d %b %H:%M"
     }
 }
 ```
 
-Available script modules: `weather`, `printer`, `mail`, `updates`, `uptime`, `cpu`, `disk`, `swap`, `loadavg`, `kernel`, `packages`.
+**Built-in modules**: `monitor`, `workspaces`, `sync`, `title`, `status`, `clock`, `volume`, `network`, `battery`, `brightness`, `media`, `memory`, `weather`, `custom`.
 
-Script modules check for an environment variable first (e.g. `VWM_WEATHER_CMD`, `VWM_CPU_CMD`), then fall back to a built-in default command. Set the env var to override.
+**Script modules** with caching and configurable refresh intervals: `weather`, `printer`, `mail`, `updates`, `uptime`, `cpu`, `disk`, `swap`, `loadavg`, `kernel`, `packages`.
 
-### Default Keybinds
+Script modules check for an environment variable first (e.g. `VWM_WEATHER_CMD`, `VWM_CPU_CMD`), then fall back to a built-in default command. Set the env var to override. Custom scripts auto-create when referenced: `script:my_thing` looks for `VWM_MY_THING_CMD`.
 
-| Key | Action |
-|-----|--------|
-| `mod+Return` | Terminal |
-| `mod+d` | Launcher |
-| `mod+j/k` | Focus next/prev |
-| `mod+h/l` | Focus monitor prev/next |
-| `mod+Shift+h/l` | Send to monitor prev/next |
-| `mod+f` | Toggle monocle |
-| `mod+Shift+f` | Toggle fullscreen |
-| `mod+q` | Kill client |
-| `mod+apostrophe` | Toggle scratchpad |
-| `mod+[/]` | Decrease/increase master factor |
-| `mod+Shift+Return` | Zoom to master |
-| `mod+s` | Toggle sync workspaces |
-| `mod+1-9` | View workspace |
-| `mod+Shift+1-9` | Send to workspace |
-| `mod+Shift+r` | Reload config |
-| `mod+Shift+q` | Quit |
+### Keybinds
+
+All keybinds are configured in the `binds` block. There are no hardcoded defaults. See `example/vwm.conf` for a complete setup. Available actions:
+
+| Action | Description |
+|--------|-------------|
+| `spawn "cmd"` | Run a named command |
+| `scratchpad` | Toggle scratchpad overlay |
+| `scratchpad "name"` | Toggle a named scratchpad |
+| `focus_next` / `focus_prev` | Cycle focus between tiled windows |
+| `focus_monitor_next` / `focus_monitor_prev` | Move focus between monitors |
+| `send_monitor_next` / `send_monitor_prev` | Send window to another monitor |
+| `monocle` | Toggle monocle layout |
+| `fullscreen` | Toggle true fullscreen |
+| `toggle_sync` | Toggle workspace sync across monitors |
+| `kill_client` | Close focused window |
+| `decrease_mfact` / `increase_mfact` | Resize master area |
+| `zoom_master` | Swap focused window into master |
+| `view_ws N` | Switch to workspace N (1-9) |
+| `send_ws N` | Send window to workspace N (1-9) |
+| `reload` | Reload config |
+| `quit` | Exit vwm |
 
 ## Notes
 
