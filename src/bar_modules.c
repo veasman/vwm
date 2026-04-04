@@ -344,6 +344,9 @@ static uint32_t module_text_color_for_kind(BarModuleKind kind) {
         case BAR_MOD_CUSTOM:
         default:
             return color_module_fg();
+
+        case BAR_MOD_SCRIPT:
+            return dynconfig.theme.accent_soft;
     }
 }
 
@@ -519,6 +522,18 @@ static void build_module_text(Monitor *m, BarModule *mod, char *buf, size_t bufl
                 buf[0] = '\0';
             } else {
                 snprintf(buf, buflen, "%s", st.text);
+            }
+            break;
+        }
+
+        case BAR_MOD_SCRIPT: {
+            ScriptModule *sm = find_script_module(mod->arg);
+            if (!sm || sm->cached_text[0] == '\0') {
+                buf[0] = '\0';
+            } else if (icons && sm->icon[0]) {
+                snprintf(buf, buflen, "%s %s", sm->icon, sm->cached_text);
+            } else {
+                snprintf(buf, buflen, "%s", sm->cached_text);
             }
             break;
         }

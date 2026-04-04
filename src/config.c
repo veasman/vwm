@@ -158,7 +158,7 @@ bool class_should_float(const char *class_name) {
     return false;
 }
 
-static void add_workspace_rule(int workspace, const char *class_name) {
+static void add_workspace_rule_full(int workspace, int monitor, const char *class_name) {
     if (!class_name || !*class_name) {
         return;
     }
@@ -175,6 +175,7 @@ static void add_workspace_rule(int workspace, const char *class_name) {
 
     WorkspaceRule *rule = &dynconfig.workspace_rules[dynconfig.workspace_rule_count++];
     rule->workspace = workspace;
+    rule->monitor = monitor;
     snprintf(rule->class_name, sizeof(rule->class_name), "%s", class_name);
 }
 
@@ -186,6 +187,21 @@ int class_workspace_rule(const char *class_name) {
     for (size_t i = 0; i < dynconfig.workspace_rule_count; i++) {
         if (ascii_case_equal(dynconfig.workspace_rules[i].class_name, class_name)) {
             return dynconfig.workspace_rules[i].workspace;
+        }
+    }
+
+    return -1;
+}
+
+int class_monitor_rule(const char *class_name) {
+    if (!class_name || !*class_name) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < dynconfig.workspace_rule_count; i++) {
+        if (ascii_case_equal(dynconfig.workspace_rules[i].class_name, class_name) &&
+            dynconfig.workspace_rules[i].monitor >= 0) {
+            return dynconfig.workspace_rules[i].monitor;
         }
     }
 
@@ -207,8 +223,45 @@ DynamicCommand *find_dynamic_command(const char *name) {
 }
 
 DynamicScratchpad *find_dynamic_scratchpad(const char *name) {
-    (void)name;
+    if (!name || !*name) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < dynconfig.scratchpad_count; i++) {
+        if (strcmp(dynconfig.scratchpads[i].name, name) == 0) {
+            return &dynconfig.scratchpads[i];
+        }
+    }
+
     return NULL;
+}
+
+static bool add_dynamic_scratchpad(const char *name, const char *cmdline, const char *class_name) {
+    if (!name || !*name || !cmdline || !*cmdline) {
+        return false;
+    }
+
+    if (dynconfig.scratchpad_count >= MAX_DYNAMIC_SCRATCHPADS) {
+        fprintf(stderr, "vwm: too many named scratchpads\n");
+        return false;
+    }
+
+    DynamicScratchpad *sp = &dynconfig.scratchpads[dynconfig.scratchpad_count];
+    memset(sp, 0, sizeof(*sp));
+
+    snprintf(sp->name, sizeof(sp->name), "%s", name);
+    if (class_name && *class_name) {
+        snprintf(sp->class_name, sizeof(sp->class_name), "%s", class_name);
+    }
+    split_command_argv(cmdline, sp->storage, sp->argv, CMD_MAX_ARGS);
+
+    if (!sp->argv[0]) {
+        fprintf(stderr, "vwm: scratchpad '%s' has empty command\n", name);
+        return false;
+    }
+
+    dynconfig.scratchpad_count++;
+    return true;
 }
 
 static void sync_named_command_to_builtin(const char *name, const char *cmdline) {
@@ -428,6 +481,31 @@ static bool add_dynamic_keybind_command(const char *combo, const char *command_n
     return true;
 }
 
+static bool add_dynamic_keybind_scratchpad(const char *combo, const char *scratchpad_name) {
+    if (!combo || !*combo || !scratchpad_name || !*scratchpad_name) {
+        return false;
+    }
+
+    if (dynconfig.keybind_count >= MAX_DYNAMIC_KEYBINDS) {
+        fprintf(stderr, "vwm: too many dynamic keybinds\n");
+        return false;
+    }
+
+    DynamicKeybind *kb = &dynconfig.keybinds[dynconfig.keybind_count];
+    memset(kb, 0, sizeof(*kb));
+
+    if (!parse_combo(combo, &kb->sym, &kb->mod)) {
+        fprintf(stderr, "vwm: invalid key combo '%s'\n", combo);
+        return false;
+    }
+
+    kb->kind = DYNKEY_SCRATCHPAD;
+    snprintf(kb->target_name, sizeof(kb->target_name), "%s", scratchpad_name);
+
+    dynconfig.keybind_count++;
+    return true;
+}
+
 static bool add_dynamic_keybind_builtin(const char *combo, Action action) {
     if (!combo || !*combo) {
         return false;
@@ -473,6 +551,11 @@ bool execute_dynamic_keybind(xcb_keysym_t sym, uint16_t mod) {
 
         if (kb->kind == DYNKEY_BUILTIN) {
             dispatch_action(kb->action);
+            return true;
+        }
+
+        if (kb->kind == DYNKEY_SCRATCHPAD) {
+            toggle_named_scratchpad(kb->target_name);
             return true;
         }
 
@@ -754,6 +837,15 @@ static bool parse_bar_module_kind(const char *name, BarModuleKind *out) {
     if (strcmp(name, "memory") == 0 || strcmp(name, "ram") == 0) { *out = BAR_MOD_MEMORY; return true; }
     if (strcmp(name, "weather") == 0) { *out = BAR_MOD_WEATHER; return true; }
 
+    if (strncmp(name, "script:", 7) == 0) {
+        const char *script_name = name + 7;
+        if (*script_name) {
+            find_or_create_script_module(script_name);
+            *out = BAR_MOD_SCRIPT;
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -868,7 +960,9 @@ static bool add_bar_module(BarModule *arr, size_t *count, const char *kind_name,
     memset(mod, 0, sizeof(*mod));
     mod->kind = kind;
 
-    if (arg && *arg) {
+    if (kind == BAR_MOD_SCRIPT && strncmp(kind_name, "script:", 7) == 0) {
+        snprintf(mod->arg, sizeof(mod->arg), "%s", kind_name + 7);
+    } else if (arg && *arg) {
         snprintf(mod->arg, sizeof(mod->arg), "%s", arg);
     }
 
@@ -1110,7 +1204,11 @@ static bool parse_rules_line(const char *raw) {
     if (strcmp(argv[0], "workspace") == 0 && argc >= 4 && strcmp(argv[2], "class") == 0) {
         int workspace = atoi(argv[1]);
         if (workspace >= 1 && workspace <= WORKSPACE_COUNT) {
-            add_workspace_rule(workspace - 1, argv[3]);
+            int monitor = -1;
+            if (argc >= 6 && strcmp(argv[4], "monitor") == 0) {
+                monitor = atoi(argv[5]) - 1;
+            }
+            add_workspace_rule_full(workspace - 1, monitor, argv[3]);
         } else {
             fprintf(stderr, "vwm: invalid workspace number '%s'\n", argv[1]);
         }
@@ -1152,11 +1250,35 @@ static bool parse_autostart_line(const char *raw) {
         return false;
     }
 
-    if (strcmp(argv[0], "run") == 0) {
-        return add_autostart_entry(argv[1]);
+    if (strcmp(argv[0], "run") != 0) {
+        fprintf(stderr, "vwm: unknown autostart directive '%s'\n", argv[0]);
+        return true;
     }
 
-    fprintf(stderr, "vwm: unknown autostart directive '%s'\n", argv[0]);
+    if (!add_autostart_entry(argv[1])) {
+        return false;
+    }
+
+    const char *class_name = NULL;
+    int workspace = -1;
+    int monitor = -1;
+
+    for (size_t i = 2; i + 1 < argc; i += 2) {
+        if (strcmp(argv[i], "class") == 0) {
+            class_name = argv[i + 1];
+        } else if (strcmp(argv[i], "workspace") == 0) {
+            workspace = atoi(argv[i + 1]) - 1;
+        } else if (strcmp(argv[i], "monitor") == 0) {
+            monitor = atoi(argv[i + 1]) - 1;
+        }
+    }
+
+    if (workspace >= 0 && workspace < WORKSPACE_COUNT && class_name) {
+        add_workspace_rule_full(workspace, monitor, class_name);
+    } else if (monitor >= 0 && class_name) {
+        add_workspace_rule_full(0, monitor, class_name);
+    }
+
     return true;
 }
 
@@ -1229,6 +1351,21 @@ static bool parse_scratchpad_overlay_line(const char *raw) {
         return true;
     }
 
+    if (strcmp(argv[0], "define") == 0 && argc >= 3) {
+        const char *name = argv[1];
+        const char *cmd = argv[2];
+        const char *cls = NULL;
+
+        for (size_t i = 3; i + 1 < argc; i += 2) {
+            if (strcmp(argv[i], "class") == 0) {
+                cls = argv[i + 1];
+            }
+        }
+
+        add_dynamic_scratchpad(name, cmd, cls);
+        return true;
+    }
+
     fprintf(stderr, "vwm: unknown scratchpad key '%s'\n", argv[0]);
     return true;
 }
@@ -1257,6 +1394,11 @@ static bool parse_binds_line(const char *raw) {
 
     if (strcmp(verb, "spawn") == 0 && argc >= base + 3) {
         add_dynamic_keybind_command(combo, argv[base + 2]);
+        return true;
+    }
+
+    if (strcmp(verb, "scratchpad") == 0 && argc >= base + 3) {
+        add_dynamic_keybind_scratchpad(combo, argv[base + 2]);
         return true;
     }
 
@@ -1560,6 +1702,217 @@ void run_scratchpad_autostart(void) {
     for (size_t i = 0; i < dynconfig.scratchpad_autostart_count; i++) {
         if (dynconfig.scratchpad_autostart[i].argv[0]) {
             spawn(dynconfig.scratchpad_autostart[i].argv);
+        }
+    }
+}
+
+typedef struct {
+    const char *name;
+    const char *env_var;
+    const char *default_cmd;
+    const char *icon;
+    uint32_t color;
+    int interval_ms;
+} PrepackagedScript;
+
+static const PrepackagedScript prepackaged_scripts[] = {
+    {
+        .name = "weather",
+        .env_var = "VWM_WEATHER_CMD",
+        .default_cmd = "",
+        .icon = "",
+        .color = 0,
+        .interval_ms = 900000,
+    },
+    {
+        .name = "printer",
+        .env_var = "VWM_PRINTER_CMD",
+        .default_cmd = "sh -c 'lpstat -p 2>/dev/null | grep -c idle'",
+        .icon = "󰐪",
+        .color = 0,
+        .interval_ms = 30000,
+    },
+    {
+        .name = "mail",
+        .env_var = "VWM_MAIL_CMD",
+        .default_cmd = "",
+        .icon = "󰇮",
+        .color = 0,
+        .interval_ms = 60000,
+    },
+    {
+        .name = "updates",
+        .env_var = "VWM_UPDATES_CMD",
+        .default_cmd = "sh -c 'checkupdates 2>/dev/null | wc -l'",
+        .icon = "󰏔",
+        .color = 0,
+        .interval_ms = 1800000,
+    },
+    {
+        .name = "uptime",
+        .env_var = "VWM_UPTIME_CMD",
+        .default_cmd = "sh -c \"uptime -p | sed 's/up //'\"",
+        .icon = "󰔟",
+        .color = 0,
+        .interval_ms = 60000,
+    },
+    {
+        .name = "cpu",
+        .env_var = "VWM_CPU_CMD",
+        .default_cmd = "sh -c \"top -bn1 | awk '/Cpu/{printf \\\"%d%%\\\", 100-$8}'\"",
+        .icon = "󰻠",
+        .color = 0,
+        .interval_ms = 2000,
+    },
+    {
+        .name = "disk",
+        .env_var = "VWM_DISK_CMD",
+        .default_cmd = "sh -c \"df -h / | awk 'NR==2{print $5}'\"",
+        .icon = "󰋊",
+        .color = 0,
+        .interval_ms = 60000,
+    },
+    {
+        .name = "swap",
+        .env_var = "VWM_SWAP_CMD",
+        .default_cmd = "sh -c \"free -h | awk '/Swap/{print $3}'\"",
+        .icon = "󰾅",
+        .color = 0,
+        .interval_ms = 5000,
+    },
+    {
+        .name = "loadavg",
+        .env_var = "VWM_LOADAVG_CMD",
+        .default_cmd = "sh -c \"awk '{print $1}' /proc/loadavg\"",
+        .icon = "󰊚",
+        .color = 0,
+        .interval_ms = 5000,
+    },
+    {
+        .name = "kernel",
+        .env_var = "VWM_KERNEL_CMD",
+        .default_cmd = "sh -c 'uname -r'",
+        .icon = "󰌽",
+        .color = 0,
+        .interval_ms = 3600000,
+    },
+    {
+        .name = "packages",
+        .env_var = "VWM_PACKAGES_CMD",
+        .default_cmd = "sh -c 'pacman -Q 2>/dev/null | wc -l'",
+        .icon = "󰏖",
+        .color = 0,
+        .interval_ms = 3600000,
+    },
+};
+
+static const PrepackagedScript *find_prepackaged_script(const char *name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < LENGTH(prepackaged_scripts); i++) {
+        if (strcmp(prepackaged_scripts[i].name, name) == 0) {
+            return &prepackaged_scripts[i];
+        }
+    }
+    return NULL;
+}
+
+ScriptModule *find_script_module(const char *name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < dynconfig.script_module_count; i++) {
+        if (strcmp(dynconfig.script_modules[i].name, name) == 0) {
+            return &dynconfig.script_modules[i];
+        }
+    }
+    return NULL;
+}
+
+int find_or_create_script_module(const char *name) {
+    if (!name) return -1;
+
+    for (size_t i = 0; i < dynconfig.script_module_count; i++) {
+        if (strcmp(dynconfig.script_modules[i].name, name) == 0) {
+            return (int)i;
+        }
+    }
+
+    if (dynconfig.script_module_count >= MAX_SCRIPT_MODULES) {
+        fprintf(stderr, "vwm: too many script modules\n");
+        return -1;
+    }
+
+    int idx = (int)dynconfig.script_module_count++;
+    ScriptModule *sm = &dynconfig.script_modules[idx];
+    memset(sm, 0, sizeof(*sm));
+    snprintf(sm->name, sizeof(sm->name), "%s", name);
+
+    const PrepackagedScript *pp = find_prepackaged_script(name);
+    if (pp) {
+        snprintf(sm->env_var, sizeof(sm->env_var), "%s", pp->env_var);
+        if (pp->default_cmd[0]) {
+            snprintf(sm->command, sizeof(sm->command), "%s", pp->default_cmd);
+        }
+        if (pp->icon[0]) {
+            snprintf(sm->icon, sizeof(sm->icon), "%s", pp->icon);
+        }
+        sm->color = pp->color;
+        sm->interval_ms = pp->interval_ms;
+    } else {
+        sm->interval_ms = 10000;
+    }
+
+    return idx;
+}
+
+static void update_script_module(ScriptModule *sm) {
+    if (!sm) return;
+
+    char buf[256] = {0};
+    const char *cmd = NULL;
+
+    if (sm->env_var[0]) {
+        const char *env_cmd = getenv(sm->env_var);
+        if (env_cmd && *env_cmd) {
+            cmd = env_cmd;
+        }
+    }
+
+    if (!cmd && sm->command[0]) {
+        cmd = sm->command;
+    }
+
+    if (!cmd) {
+        sm->cached_text[0] = '\0';
+        return;
+    }
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        sm->cached_text[0] = '\0';
+        return;
+    }
+
+    if (fgets(buf, sizeof(buf), fp)) {
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r' ||
+               buf[len-1] == ' ' || buf[len-1] == '\t')) {
+            buf[--len] = '\0';
+        }
+    }
+    pclose(fp);
+
+    snprintf(sm->cached_text, sizeof(sm->cached_text), "%s", buf);
+}
+
+void refresh_script_modules(bool force) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now = (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+
+    for (size_t i = 0; i < dynconfig.script_module_count; i++) {
+        ScriptModule *sm = &dynconfig.script_modules[i];
+        if (force || now - sm->last_update_ms >= sm->interval_ms) {
+            sm->last_update_ms = now;
+            update_script_module(sm);
         }
     }
 }

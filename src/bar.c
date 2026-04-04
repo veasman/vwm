@@ -517,6 +517,7 @@ void bar_tick(void) {
     if (now_ms - last_ms >= 1000) {
         last_ms = now_ms;
         refresh_system_status(false);
+        refresh_script_modules(false);
         update_status_cache();
         draw_all_bars();
     }

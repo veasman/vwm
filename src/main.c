@@ -63,6 +63,7 @@ int main(void) {
     apply_config();
     run_autostart();
     refresh_system_status(true);
+    refresh_script_modules(true);
     update_status_cache();
     scan_existing_windows();
     draw_all_bars();

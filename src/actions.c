@@ -504,9 +504,76 @@ void toggle_scratchpad(const void *arg) {
     open_scratch_overlay_on(wm.selmon);
 }
 
+static Client *find_scratch_client_by_class(const char *class_name) {
+    if (!class_name || !*class_name) {
+        return NULL;
+    }
+
+    for (Client *c = wm.scratch_workspace.clients; c; c = c->next) {
+        xcb_icccm_get_wm_class_reply_t reply;
+        if (xcb_icccm_get_wm_class_reply(
+                wm.conn,
+                xcb_icccm_get_wm_class(wm.conn, c->win),
+                &reply,
+                NULL)) {
+            bool match =
+                (reply.instance_name && strcmp(reply.instance_name, class_name) == 0) ||
+                (reply.class_name && strcmp(reply.class_name, class_name) == 0);
+            xcb_icccm_get_wm_class_reply_wipe(&reply);
+            if (match) {
+                return c;
+            }
+        }
+    }
+
+    return NULL;
+}
+
 void toggle_named_scratchpad(const char *name) {
-    (void)name;
-    toggle_scratchpad(NULL);
+    if (!name || !*name || !wm.selmon) {
+        toggle_scratchpad(NULL);
+        return;
+    }
+
+    DynamicScratchpad *sp = find_dynamic_scratchpad(name);
+    if (!sp) {
+        fprintf(stderr, "vwm: unknown named scratchpad '%s'\n", name);
+        return;
+    }
+
+    if (wm.scratch_overlay_visible && wm.scratch_monitor == wm.selmon) {
+        Client *match = sp->class_name[0] ? find_scratch_client_by_class(sp->class_name) : NULL;
+        if (match && wm.scratch_workspace.focused == match) {
+            close_scratch_overlay();
+            return;
+        }
+        if (match) {
+            wm.scratch_workspace.focused = match;
+            layout_monitor(wm.selmon);
+            focus_client(match);
+            return;
+        }
+        if (sp->argv[0]) {
+            spawn(sp->argv);
+        }
+        return;
+    }
+
+    ensure_scratch_workspace_ready();
+
+    Client *match = sp->class_name[0] ? find_scratch_client_by_class(sp->class_name) : NULL;
+    if (!match && sp->argv[0]) {
+        spawn(sp->argv);
+    }
+
+    open_scratch_overlay_on(wm.selmon);
+
+    match = sp->class_name[0] ? find_scratch_client_by_class(sp->class_name) : NULL;
+    if (match) {
+        wm.scratch_workspace.focused = match;
+        layout_monitor(wm.selmon);
+        focus_client(match);
+    }
 }
 
 bool client_supports_protocol(Client *c, xcb_atom_t protocol) {

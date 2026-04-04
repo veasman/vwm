@@ -23,6 +23,7 @@ typedef struct {
 
 typedef struct {
     int workspace;
+    int monitor;
     char class_name[128];
 } WorkspaceRule;
 
@@ -70,7 +71,21 @@ typedef enum {
     BAR_MOD_MEDIA,
     BAR_MOD_MEMORY,
     BAR_MOD_WEATHER,
+    BAR_MOD_SCRIPT,
 } BarModuleKind;
+
+#define MAX_SCRIPT_MODULES 16
+
+typedef struct {
+    char name[64];
+    char command[512];
+    char env_var[128];
+    char icon[32];
+    uint32_t color;
+    int interval_ms;
+    char cached_text[256];
+    long last_update_ms;
+} ScriptModule;
 
 typedef struct {
     BarModuleKind kind;
@@ -170,6 +185,9 @@ typedef struct {
     ThemeConfig theme;
     BarStyleConfig bar_style;
 
+    ScriptModule script_modules[MAX_SCRIPT_MODULES];
+    size_t script_module_count;
+
     LayoutKind default_layout;
     int configured_workspace_count;
 
@@ -203,9 +221,14 @@ void run_scratchpad_autostart(void);
 
 bool class_should_float(const char *class_name);
 int class_workspace_rule(const char *class_name);
+int class_monitor_rule(const char *class_name);
 
 DynamicCommand *find_dynamic_command(const char *name);
 DynamicScratchpad *find_dynamic_scratchpad(const char *name);
 bool execute_dynamic_keybind(xcb_keysym_t sym, uint16_t mod);
+
+ScriptModule *find_script_module(const char *name);
+int find_or_create_script_module(const char *name);
+void refresh_script_modules(bool force);
 
 #endif
