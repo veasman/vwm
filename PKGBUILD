@@ -1,3 +1,4 @@
+# Maintainer: Charlton Moren <charlton.moren@gmail.com>
 pkgname=vwm-git
 pkgver=r0.0000000
 pkgrel=1
